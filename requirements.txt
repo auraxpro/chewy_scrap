@@ -1,0 +1,11 @@
+# Core scraping tools
+undetected-chromedriver==3.5.5
+selenium==4.16.0
+beautifulsoup4==4.12.2
+
+# Database (your existing stack)
+SQLAlchemy==2.0.23
+psycopg2-binary==2.9.9
+
+# Environment variables
+python-dotenv==1.0.0
