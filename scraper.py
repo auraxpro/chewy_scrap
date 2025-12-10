@@ -6,6 +6,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import WebDriverException, NoSuchWindowException
+from selenium.webdriver.support.wait import WebDriverWait
 from bs4 import BeautifulSoup
 from database import SessionLocal, ProductList, ProductDetails
 from sqlalchemy.exc import IntegrityError
@@ -105,82 +106,97 @@ class ChewyScraperUCD:
     # ⭐ Load a Chewy page with retries
     # ----------------------------------------
     def load_page(self, url: str):
-        for attempt in range(3):
+        try:
+            # Ensure driver and window are valid before proceeding
+            self._ensure_window()
+            
+            # Switch to the first window if multiple exist
+            if len(self.driver.window_handles) > 0:
+                self.driver.switch_to.window(self.driver.window_handles[0])
+            
+            self.driver.get(url)
+            
+            # ------------------------------
+            # Wait for initial network activity
+            # ------------------------------
+            time.sleep(random.uniform(1.0, 1.5))
+                            
+            # ------------------------------
+            # Wait for body to appear
+            # ------------------------------
             try:
-                print(f"Loading page: {url} (attempt {attempt+1})")
-                
-                # Ensure driver and window are valid before proceeding
-                self._ensure_window()
-                
-                # Switch to the first window if multiple exist
-                if len(self.driver.window_handles) > 0:
-                    self.driver.switch_to.window(self.driver.window_handles[0])
-                
-                self.driver.get(url)
-                time.sleep(random.uniform(2.5, 4.0))
-
-                # Verify page loaded successfully
-                if not self._is_driver_alive():
-                    raise NoSuchWindowException("Window closed after page load")
-
-                # self.human_mouse_move()
-                # self.slow_scroll()
-
-                # Check again before getting page source
-                if not self._is_driver_alive():
-                    raise NoSuchWindowException("Window closed during interaction")
-
-                html = self.driver.page_source
-                
-                # Detect incomplete page loads
-                if not html or len(html) < 5000:
-                    print(f"⚠️  Incomplete page detected (length: {len(html) if html else 0}) — retrying…")
-                    if attempt < 2:
-                        time.sleep(3)
-                        continue
-                    else:
-                        print("❌ Page content too short after all retries")
-                        return None
-                
-                # Detect common blocking/error pages
-                html_lower = html.lower()
-                if any(indicator in html_lower for indicator in [
-                    "access denied", "blocked", "captcha", 
-                    "cloudflare", "checking your browser",
-                    "please enable cookies", "error 403", "error 503"
-                ]):
-                    print(f"⚠️  Page blocked or error page detected — retrying…")
-                    if attempt < 2:
-                        time.sleep(3)
-                        continue
-                    else:
-                        print("❌ Page blocked after all retries")
-                        return None
-
-                return html
-
-            except (NoSuchWindowException, WebDriverException) as e:
-                error_msg = str(e).lower()
-                if "no such window" in error_msg or "target window already closed" in error_msg or "web view not found" in error_msg:
-                    print(f"⚠️  Browser window closed (attempt {attempt+1}/3), reinitializing...")
-                    # Reinitialize driver for next attempt
-                    try:
-                        self._init_driver()
-                        time.sleep(3)  # Give browser time to fully initialize
-                    except Exception as init_error:
-                        print(f"❌ Failed to reinitialize driver: {init_error}")
-                        if attempt == 2:  # Last attempt
-                            return None
-                else:
-                    print(f"Error loading page: {e}")
-                    if attempt < 2:
-                        time.sleep(2)
+                WebDriverWait(self.driver, 10).until(
+                    lambda d: d.find_element(By.TAG_NAME, "body")
+                )
             except Exception as e:
-                print(f"Unexpected error loading page: {e}")
-                if attempt < 2:
-                    time.sleep(2)
-
-        print("❌ FAILED to load page after retries")
+                print(f"❌ ERROR: Page not loaded properly: {e}")
+                return None
+            
+            # ------------------------------
+            # Wait for JS DOM readiness
+            # ------------------------------
+            try:
+                WebDriverWait(self.driver, 12).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
+            except Exception:
+                # Don't fail completely if readyState check times out
+                pass
+            
+            # Verify page loaded successfully
+            if not self._is_driver_alive():
+                raise NoSuchWindowException("Window closed after page load")
+            
+            # ------------------------------
+            # Scroll to trigger lazy-loaded content
+            # ------------------------------
+            self.slow_scroll()
+            # time.sleep(random.uniform(1.0, 1.8))
+            
+            # Check again before getting page source
+            if not self._is_driver_alive():
+                raise NoSuchWindowException("Window closed during interaction")
+            
+            html = self.driver.page_source
+            
+            # ------------------------------
+            # Validate REAL Chewy product page
+            # ------------------------------
+            soup = BeautifulSoup(html, "html.parser")
+            
+            # Check for product page
+            if soup.select_one("h1[data-testid='product-title-heading']"):
+                print("✅ Product page loaded successfully.")
+                return html
+            
+            # Check for category/listing page
+            if soup.select_one(".kib-product-card"):
+                print("✅ Category/listing page loaded successfully.")
+                return html
+            
+            # If HTML is too short → likely blocked or incomplete
+            if len(html) < 8000:
+                print(f"⚠️ HTML too short ({len(html)} bytes) — retrying…")
+                return None
+            
+            # If we got here and HTML is long enough, return it anyway
+            # (might be a different page type we don't recognize)
+            print("⚠️ Page loaded but structure not recognized — returning HTML anyway")
+            return html
+            
+        except (NoSuchWindowException, WebDriverException) as e:
+            error_msg = str(e).lower()
+            if "no such window" in error_msg or "target window already closed" in error_msg or "web view not found" in error_msg:
+                try:
+                    self._init_driver()
+                    time.sleep(3)  # Give browser time to fully initialize
+                except Exception as init_error:
+                    print(f"❌ Failed to reinitialize driver: {init_error}")
+                    return None
+        except Exception as e:
+            print(f"❌ Unexpected error loading page: {e}")
+        
+        print("❌ FAILED to load page after 4 attempts")
         return None
 
     # ----------------------------------------
@@ -471,6 +487,7 @@ class ChewyScraperUCD:
         
         # Extract details block using the new approach
         details_block = self.extract_details_block(soup)
+        print(details_block)
         out["details"] = details_block["details"]
         out["more_details"] = details_block["more_details"]
         out["specifications"] = details_block["specifications"]
@@ -478,7 +495,6 @@ class ChewyScraperUCD:
         # Verify we got at least some data (if page loaded, we should have details)
         if not details_block["details"]:
             print(f"❌ ERROR: No details extracted - page may be incomplete")
-            print(f"❌ ERROR: Page structure may be missing or incomplete")
             return None
         
         # ===========================================================
@@ -589,6 +605,34 @@ class ChewyScraperUCD:
             db.close()
     
     # ----------------------------------------
+    # ⭐ Mark product as skipped
+    # ----------------------------------------
+    def mark_product_as_skipped(self, product_id: int):
+        """Mark a product as skipped when details cannot be extracted"""
+        db = SessionLocal()
+        try:
+            # Get the product
+            product = db.query(ProductList).filter_by(id=product_id).first()
+            if not product:
+                print(f"❌ Product with id {product_id} not found")
+                return False
+            
+            # Mark as skipped
+            product.skipped = True
+            db.commit()
+            print(f"✅ Marked product {product_id} as skipped")
+            return True
+            
+        except Exception as e:
+            db.rollback()
+            print(f"❌ Error marking product as skipped: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        finally:
+            db.close()
+    
+    # ----------------------------------------
     # ⭐ Scrape product details by URL (test mode)
     # ----------------------------------------
     def scrape_product_by_url(self, product_url: str, img_link: str = None):
@@ -616,8 +660,8 @@ class ChewyScraperUCD:
         """Scrape details for all products that haven't been scraped yet"""
         db = SessionLocal()
         try:
-            # Get all unscraped products
-            query = db.query(ProductList).filter_by(scraped=False).order_by(ProductList.id)
+            # Get all unscraped products (exclude skipped products)
+            query = db.query(ProductList).filter_by(scraped=False, skipped=False).order_by(ProductList.id)
             if offset is not None:
                 query = query.offset(offset)
             if limit:
@@ -649,10 +693,11 @@ class ChewyScraperUCD:
                         else:
                             fail_count += 1
                     else:
-                        # If details is None, KEY_BENEFITS-section was not found - stop scraping
-                        print(f"🛑 Stopping scraping: KEY_BENEFITS-section not found for product: {product.product_url}")
-                        print(f"📊 Progress: {success_count} successful, {fail_count} failed")
-                        return
+                        # If details is None, mark product as skipped and continue
+                        print(f"⚠️ No details extracted for product: {product.product_url} - marking as skipped")
+                        self.mark_product_as_skipped(product.id)
+                        fail_count += 1
+                        # Continue to next product instead of stopping
                     
                     # Random delay between products
                     time.sleep(random.uniform(2.0, 4.0))

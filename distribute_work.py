@@ -15,22 +15,22 @@ from database import SessionLocal, ProductList
 from sqlalchemy import func
 
 def get_unscraped_count():
-    """Get total count of unscraped products"""
+    """Get total count of unscraped products (excluding skipped)"""
     db = SessionLocal()
     try:
-        count = db.query(func.count(ProductList.id)).filter_by(scraped=False).scalar()
+        count = db.query(func.count(ProductList.id)).filter_by(scraped=False, skipped=False).scalar()
         return count
     finally:
         db.close()
 
 def get_unscraped_id_range():
-    """Get min and max IDs of unscraped products"""
+    """Get min and max IDs of unscraped products (excluding skipped)"""
     db = SessionLocal()
     try:
         result = db.query(
             func.min(ProductList.id).label('min_id'),
             func.max(ProductList.id).label('max_id')
-        ).filter_by(scraped=False).first()
+        ).filter_by(scraped=False, skipped=False).first()
         return result.min_id, result.max_id
     finally:
         db.close()

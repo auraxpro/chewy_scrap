@@ -12,6 +12,7 @@ class ProductList(Base):
     product_url = Column(String, unique=True, nullable=False, index=True)
     page_num = Column(Integer, nullable=False)
     scraped = Column(Boolean, default=False, nullable=False)
+    skipped = Column(Boolean, default=False, nullable=False, index=True)
     product_image_url = Column(String, nullable=True)
     
     # Relationship to ProductDetails

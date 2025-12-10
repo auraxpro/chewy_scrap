@@ -24,7 +24,7 @@ from typing import Optional
 
 # Configuration
 MAX_RESTARTS = 200  # Maximum number of automatic restarts
-RESTART_COOLDOWN = 50  # Seconds to wait before restarting
+RESTART_COOLDOWN = 5  # Seconds to wait before restarting
 TIMEOUT_ERROR_KEYWORDS = [
     "timeout: Timed out receiving message from renderer",
     "timeout: Timed out",
@@ -87,15 +87,49 @@ class ScraperMonitor:
         """Kill the scraper process and all its children"""
         if self.process:
             try:
-                # Try graceful termination first
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    # Force kill if it doesn't terminate gracefully
-                    self.log("Process didn't terminate gracefully, forcing kill...", "WARN")
-                    self.process.kill()
-                    self.process.wait()
+                # Get the process group ID (pgid) if on Unix
+                if sys.platform != 'win32':
+                    try:
+                        pgid = os.getpgid(self.process.pid)
+                        # Try graceful termination first (SIGTERM to entire process group)
+                        os.killpg(pgid, signal.SIGTERM)
+                        try:
+                            self.process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            # Force kill if it doesn't terminate gracefully
+                            self.log("Process didn't terminate gracefully, forcing kill...", "WARN")
+                            os.killpg(pgid, signal.SIGKILL)
+                            self.process.wait()
+                    except ProcessLookupError:
+                        # Process already dead
+                        pass
+                    except OSError as e:
+                        # Fallback to regular kill if killpg fails
+                        self.log(f"killpg failed, using regular kill: {e}", "WARN")
+                        self.process.terminate()
+                        try:
+                            self.process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            self.process.kill()
+                            self.process.wait()
+                else:
+                    # Windows: use taskkill to kill process tree
+                    try:
+                        self.process.terminate()
+                        try:
+                            self.process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            # Force kill on Windows
+                            self.log("Process didn't terminate gracefully, forcing kill...", "WARN")
+                            self.process.kill()
+                            self.process.wait()
+                    except Exception:
+                        # Try taskkill as last resort
+                        try:
+                            subprocess.run(['taskkill', '/F', '/T', '/PID', str(self.process.pid)], 
+                                         capture_output=True, timeout=5)
+                        except Exception:
+                            pass
             except Exception as e:
                 self.log(f"Error killing process: {e}", "ERROR")
             finally:
@@ -137,11 +171,13 @@ class ScraperMonitor:
                 # Check for timeout errors
                 if self.detect_timeout_error(line):
                     self.log(f"Timeout error detected: {line.strip()}", "ERROR")
+                    self.kill_process()
                     return 1  # Signal restart needed
                 
                 # Check for incomplete page load errors
                 if self.detect_incomplete_page_error(line):
                     self.log(f"Incomplete page error detected: {line.strip()}", "ERROR")
+                    self.kill_process()
                     return 1  # Signal restart needed
             
             # Wait for process to complete
@@ -186,7 +222,11 @@ class ScraperMonitor:
             # Check if we've exceeded max restarts
             if self.restart_count >= self.max_restarts:
                 self.log(f"Maximum restart limit ({self.max_restarts}) reached. Stopping.", "ERROR")
+                self.kill_process()
                 sys.exit(1)
+            
+            # Kill any remaining process before restarting
+            self.kill_process()
             
             # Increment restart counter
             self.restart_count += 1
