@@ -1,3 +1,4 @@
+from pickle import FALSE
 import time
 import random
 import undetected_chromedriver as uc
@@ -6,7 +7,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import WebDriverException, NoSuchWindowException
 from bs4 import BeautifulSoup
-from database import SessionLocal, ProductList
+from database import SessionLocal, ProductList, ProductDetails
 from sqlalchemy.exc import IntegrityError
 import ssl, certifi
 ssl._create_default_https_context = lambda *args, **kwargs: ssl.create_default_context(cafile=certifi.where())
@@ -93,9 +94,9 @@ class ChewyScraperUCD:
     def slow_scroll(self):
         try:
             self._ensure_window()
-            for _ in range(random.randint(6, 10)):
+            for _ in range(random.randint(1, 3)):
                 self.driver.execute_script("window.scrollBy(0, arguments[0]);", random.randint(250, 450))
-                time.sleep(random.uniform(0.3, 0.7))
+                time.sleep(random.uniform(0.1, 0.3))
         except Exception as e:
             print(f"⚠️  Error in scrolling: {e}")
             # Don't fail completely, just skip scrolling
@@ -130,13 +131,31 @@ class ChewyScraperUCD:
                     raise NoSuchWindowException("Window closed during interaction")
 
                 html = self.driver.page_source
-                # print(html)
-
-                # Detect Akamai block
-                # if "captcha" in html.lower() or len(html) < 5000:
-                #     print("⚠ Blocked or incomplete page — retrying…")
-                #     time.sleep(2)
-                #     continue
+                
+                # Detect incomplete page loads
+                if not html or len(html) < 5000:
+                    print(f"⚠️  Incomplete page detected (length: {len(html) if html else 0}) — retrying…")
+                    if attempt < 2:
+                        time.sleep(3)
+                        continue
+                    else:
+                        print("❌ Page content too short after all retries")
+                        return None
+                
+                # Detect common blocking/error pages
+                html_lower = html.lower()
+                if any(indicator in html_lower for indicator in [
+                    "access denied", "blocked", "captcha", 
+                    "cloudflare", "checking your browser",
+                    "please enable cookies", "error 403", "error 503"
+                ]):
+                    print(f"⚠️  Page blocked or error page detected — retrying…")
+                    if attempt < 2:
+                        time.sleep(3)
+                        continue
+                    else:
+                        print("❌ Page blocked after all retries")
+                        return None
 
                 return html
 
@@ -277,6 +296,383 @@ class ChewyScraperUCD:
 
         print(f"\n✅ Total products scraped: {len(all_products)}")
         return all_products
+
+    # ----------------------------------------
+    # ⭐ Extract all content
+    # ----------------------------------------
+    def extract_all_content(self, element):
+        if element is None:
+            return None
+        
+        result_lines = []
+
+        # ===========================================================
+        # 1. Extract ALL TABLES (preserve multi-column tables)
+        # ===========================================================
+        tables = element.find_all("table")
+        for table in tables:
+            rows = table.find_all("tr")
+            for tr in rows:
+                cells = [td.get_text(" ", strip=True) for td in tr.find_all(["th", "td"])]
+                if cells:
+                    result_lines.append(" | ".join(cells))
+            result_lines.append("")  # blank line after each table
+
+        # ===========================================================
+        # 2. Extract ALL LISTS
+        # ===========================================================
+        for ul in element.find_all("ul"):
+            for li in ul.find_all("li"):
+                text = li.get_text(" ", strip=True)
+                if text:
+                    result_lines.append(f"- {text}")
+            result_lines.append("")
+
+        # ===========================================================
+        # 3. Extract ALL PARAGRAPHS (including <strong> tags)
+        # ===========================================================
+        for p in element.find_all("p"):
+            text = p.get_text(" ", strip=True)
+            if text:
+                result_lines.append(text)
+                result_lines.append("")
+
+        # Cleanup multiple blank lines
+        cleaned = "\n".join([line for line in result_lines if line.strip() != ""])
+
+        return cleaned if cleaned else None
+
+    # ----------------------------------------
+    # ⭐ Extract Details Block (details, more_details, specifications)
+    # ----------------------------------------
+    def extract_details_block(self, soup):
+        """
+        Extracts:
+          - details (benefits from first visible section)
+          - more_details (description from hidden div middle sections)
+          - specifications (table from hidden div last section)
+        from the kib-truncation-content container.
+        """
+        out = {
+            "details": None,
+            "more_details": None,
+            "specifications": None
+        }
+
+        # 1️⃣ Find the base container
+        trunc = soup.select_one(".kib-truncation-content")
+        if not trunc:
+            return out
+
+        # --------------------------------------------
+        # 2️⃣ Extract DETAILS (from first <section>)
+        # --------------------------------------------
+        first_section = trunc.find("section", recursive=False)
+        if first_section:
+            out["details"] = self.extract_all_content(first_section)
+
+        # --------------------------------------------
+        # 3️⃣ Hidden block contains description + specs
+        # --------------------------------------------
+        hidden_div = None
+        for child in trunc.find_all(recursive=False):
+            if child.name == "div" and child.get("style", "").startswith("display:none"):
+                hidden_div = child
+                break
+
+        if not hidden_div:
+            return out
+
+        # Extract ALL <section> items inside hidden div
+        sections = hidden_div.find_all("section", recursive=False)
+        if len(sections) == 0:
+            return out
+
+        # 🍖 First hidden section = duplicate KEY BENEFITS → ignore
+        # 🧾 Last hidden section = SPECIFICATIONS → extract table
+        # ✨ Middle sections = DESCRIPTION paragraphs
+
+        # --------------------------------------------
+        # 4️⃣ Extract SPECIFICATIONS (last section)
+        # --------------------------------------------
+        spec_section = sections[-1]
+        out["specifications"] = self.extract_all_content(spec_section)
+
+        # --------------------------------------------
+        # 5️⃣ Extract MORE_DETAILS (middle sections)
+        # --------------------------------------------
+        middle_sections = sections[1:-1]   # exclude first (duplicate) & last (specs)
+        if middle_sections:
+            paras = []
+            for sec in middle_sections:
+                paras.append(self.extract_all_content(sec))
+            out["more_details"] = "\n\n".join(paras)
+
+        return out
+
+    # ----------------------------------------
+    # ⭐ Extract product details from HTML
+    # ----------------------------------------
+    def extract_product_details(self, html: str, product_url: str, img_link: str = None):
+        soup = BeautifulSoup(html, "html.parser")
+
+        out = {
+            "product_url": product_url,
+            "img_link": img_link,
+            "product_name": None,
+            "product_category": None,
+            "price": None,
+            "size": None,
+            "details": None,               # KEY BENEFITS
+            "more_details": None,          # DESCRIPTION + MULTI-PARAGRAPH TEXT
+            "specifications": None,        # FULL TABLE
+            "ingredients": None,
+            "caloric_content": None,
+            "guaranteed_analysis": None,
+            "feeding_instructions": None,
+            "transition_instructions": None
+        }
+
+        # ===========================================================
+        # PRODUCT NAME (stable)
+        # ===========================================================
+        name = soup.select_one("h1[data-testid='product-title-heading']")
+        if name:
+            out["product_name"] = name.get_text(strip=True)
+        # ===========================================================
+        # CATEGORY (Breadcrumbs)
+        # ===========================================================
+        crumb = soup.select("ol.kib-breadcrumbs__list li a")
+        if len(crumb) >= 3:
+            out["product_category"] = crumb[2].get_text(strip=True)
+        # ===========================================================
+        # PRICE
+        # ===========================================================
+        dollars = soup.select_one(".kib-product-price__dollars")
+        cents = soup.select_one(".kib-product-price__cents")
+        if dollars and cents:
+            out["price"] = f"${dollars.text.strip()}.{cents.text.strip()}"
+        # ===========================================================
+        # SIZE (stable swatch heading)
+        # ===========================================================
+        size = soup.select_one("h2.kib-swatch__heading strong")
+        if size:
+            out["size"] = size.get_text(strip=True)
+        
+        # ===========================================================
+        # DETAILS BLOCK (details, more_details, specifications)
+        # ===========================================================
+        # Check if page loaded properly - verify key elements exist
+        trunc_container = soup.select_one("div.kib-truncation-content")
+        if not trunc_container:
+            print(f"❌ ERROR: Page structure incomplete - missing kib-truncation-content")
+            print(f"❌ ERROR: Page may not have loaded fully")
+            return None
+        
+        # Extract details block using the new approach
+        details_block = self.extract_details_block(soup)
+        out["details"] = details_block["details"]
+        out["more_details"] = details_block["more_details"]
+        out["specifications"] = details_block["specifications"]
+        
+        # Verify we got at least some data (if page loaded, we should have details)
+        if not details_block["details"]:
+            print(f"❌ ERROR: No details extracted - page may be incomplete")
+            print(f"❌ ERROR: Page structure may be missing or incomplete")
+            return None
+        
+        # ===========================================================
+        # INGREDIENTS
+        # ===========================================================
+        ing_section = soup.select_one("#INGREDIENTS-section")
+        if ing_section:
+            ing = self.extract_all_content(ing_section)
+            if ing:
+                out["ingredients"] = ing
+        # ===========================================================
+        # CALORIC CONTENT
+        # ===========================================================
+        cal_section = soup.select_one("#CALORIC_CONTENT-section")
+        if cal_section:
+            cal = self.extract_all_content(cal_section)
+            if cal:
+                out["caloric_content"] = cal
+        # ===========================================================
+        # GUARANTEED ANALYSIS
+        # ===========================================================
+        ga_section = soup.select_one("#GUARANTEED_ANALYSIS-section")
+        if ga_section:
+            ga = self.extract_all_content(ga_section)
+            if ga:
+                out["guaranteed_analysis"] = ga
+        # ===========================================================
+        # FEEDING INSTRUCTIONS
+        # ===========================================================
+        feed_section = soup.select_one("#FEEDING_INSTRUCTIONS-section")
+        if feed_section:
+            feed = self.extract_all_content(feed_section)
+            if feed:
+                out["feeding_instructions"] = feed
+        # ===========================================================
+        # TRANSITION INSTRUCTIONS
+        # ===========================================================
+        trans_section = soup.select_one("#TRANSITION_INSTRUCTIONS-section")
+        if trans_section:
+            trans = self.extract_all_content(trans_section)
+            if trans:
+                out["transition_instructions"] = trans
+
+        return out
+
+    
+    # ----------------------------------------
+    # ⭐ Scrape product details from a product URL
+    # ----------------------------------------
+    def scrape_product_details(self, product_url: str, img_link: str = None):
+        """Scrape detailed product information from a product page"""
+        print(f"\n📦 Scraping product details: {product_url}")
+        
+        html = self.load_page(product_url)
+        if not html:
+            print(f"❌ ERROR: Failed to load product page: {product_url}")
+            print(f"❌ ERROR: Page load failed - incomplete or blocked page")
+            return None
+        # Reload HTML after scrolling
+        html = self.driver.page_source
+        
+        details = self.extract_product_details(html, product_url, img_link)
+        return details
+    
+    # ----------------------------------------
+    # ⭐ Save product details to database and update scraped flag
+    # ----------------------------------------
+    def save_product_details(self, product_id: int, details: dict):
+        """Save product details to database and update scraped flag"""
+        db = SessionLocal()
+        try:
+            # Get the product
+            product = db.query(ProductList).filter_by(id=product_id).first()
+            if not product:
+                print(f"❌ Product with id {product_id} not found")
+                return False
+            
+            # Check if details already exist
+            existing_details = db.query(ProductDetails).filter_by(product_id=product_id).first()
+            
+            if existing_details:
+                # Update existing details
+                for key, value in details.items():
+                    if hasattr(existing_details, key):
+                        setattr(existing_details, key, value)
+            else:
+                # Create new details
+                product_details = ProductDetails(
+                    product_id=product_id,
+                    **details
+                )
+                db.add(product_details)
+            
+            # Update scraped flag
+            product.scraped = True
+            
+            db.commit()
+            print(f"✅ Saved product details for: {details.get('product_name', 'Unknown')}")
+            return True
+            
+        except Exception as e:
+            db.rollback()
+            print(f"❌ Error saving product details: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        finally:
+            db.close()
+    
+    # ----------------------------------------
+    # ⭐ Scrape product details by URL (test mode)
+    # ----------------------------------------
+    def scrape_product_by_url(self, product_url: str, img_link: str = None):
+        """Scrape a single product by URL (for testing) - prints results only, does not save to database"""
+        details = self.scrape_product_details(product_url, img_link)
+        if details:
+            print("\n📊 Scraped Product Details (TEST MODE - Not Saved):")
+            print("=" * 50)
+            for key, value in details.items():
+                if value:
+                    # Print full value for test mode, truncate only very long values
+                    display_value = value
+                    print(f"{key}: {display_value}")
+            print("=" * 50)
+            print("ℹ️  TEST MODE: Data not saved to database")
+        else:
+            print("❌ Failed to scrape product: KEY_BENEFITS-section not found")
+        
+        return details
+    
+    # ----------------------------------------
+    # ⭐ Scrape all unscraped products
+    # ----------------------------------------
+    def scrape_all_product_details(self, limit: int = None, offset: int = None):
+        """Scrape details for all products that haven't been scraped yet"""
+        db = SessionLocal()
+        try:
+            # Get all unscraped products
+            query = db.query(ProductList).filter_by(scraped=False).order_by(ProductList.id)
+            if offset is not None:
+                query = query.offset(offset)
+            if limit:
+                query = query.limit(limit)
+            unscraped_products = query.all()
+            
+            total = len(unscraped_products)
+            print(f"\n📦 Found {total} unscraped products")
+            
+            if total == 0:
+                print("✅ All products have been scraped!")
+                return
+            
+            success_count = 0
+            fail_count = 0
+            
+            for idx, product in enumerate(unscraped_products, 1):
+                print(f"\n[{idx}/{total}] Processing: {product.product_url}")
+                
+                try:
+                    details = self.scrape_product_details(
+                        product.product_url,
+                        product.product_image_url
+                    )
+                    
+                    if details:
+                        if self.save_product_details(product.id, details):
+                            success_count += 1
+                        else:
+                            fail_count += 1
+                    else:
+                        # If details is None, KEY_BENEFITS-section was not found - stop scraping
+                        print(f"🛑 Stopping scraping: KEY_BENEFITS-section not found for product: {product.product_url}")
+                        print(f"📊 Progress: {success_count} successful, {fail_count} failed")
+                        return
+                    
+                    # Random delay between products
+                    time.sleep(random.uniform(2.0, 4.0))
+                    
+                except Exception as e:
+                    fail_count += 1
+                    print(f"❌ Error scraping product {product.id}: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            print(f"\n✅ Scraping completed!")
+            print(f"   Success: {success_count}")
+            print(f"   Failed: {fail_count}")
+            
+        except Exception as e:
+            print(f"❌ Error in scrape_all_product_details: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            db.close()
 
     # ----------------------------------------
     # ⭐ Cleanup
