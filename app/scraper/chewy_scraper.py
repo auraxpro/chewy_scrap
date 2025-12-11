@@ -1,27 +1,35 @@
-from pickle import FALSE
-import time
 import random
+import ssl
+import time
+from pickle import FALSE
+
+import certifi
 import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import WebDriverException, NoSuchWindowException
-from selenium.webdriver.support.wait import WebDriverWait
 from bs4 import BeautifulSoup
-from database import SessionLocal, ProductList, ProductDetails
+from selenium.common.exceptions import NoSuchWindowException, WebDriverException
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.wait import WebDriverWait
 from sqlalchemy.exc import IntegrityError
-import ssl, certifi
-ssl._create_default_https_context = lambda *args, **kwargs: ssl.create_default_context(cafile=certifi.where())
+
+from app.models.database import SessionLocal
+from app.models.product import ProductDetails, ProductList
+
+ssl._create_default_https_context = lambda *args, **kwargs: ssl.create_default_context(
+    cafile=certifi.where()
+)
 
 
 BASE_URL = "https://www.chewy.com/b/food-332"
 PAGE_URL_TEMPLATE = "https://www.chewy.com/b/food_c332_p{page}"
 
+
 class ChewyScraperUCD:
     def __init__(self):
         self.driver = None
         self._init_driver()
-        
+
     def _init_driver(self):
         """Initialize or reinitialize the Chrome driver"""
         try:
@@ -32,13 +40,13 @@ class ChewyScraperUCD:
                     pass
         except:
             pass
-            
+
         chrome_opts = uc.ChromeOptions()
         # Basic options that are safe and compatible with undetected_chromedriver
         chrome_opts.add_argument("--start-maximized")
         chrome_opts.add_argument("--no-sandbox")
         chrome_opts.add_argument("--disable-dev-shm-usage")
-        
+
         # Note: undetected_chromedriver already handles stealth features internally,
         # so we don't need to add excludeSwitches or useAutomationExtension
 
@@ -47,7 +55,7 @@ class ChewyScraperUCD:
         # Ensure we have at least one window
         if len(self.driver.window_handles) == 0:
             raise Exception("Failed to create browser window")
-        
+
     def _is_driver_alive(self):
         """Check if driver and window are still valid"""
         try:
@@ -58,14 +66,14 @@ class ChewyScraperUCD:
             return len(handles) > 0
         except (WebDriverException, NoSuchWindowException, AttributeError):
             return False
-    
+
     def _ensure_window(self):
         """Ensure we have a valid window, recreate driver if needed"""
         if not self._is_driver_alive():
             print("⚠️  Browser window closed unexpectedly, reinitializing...")
             self._init_driver()
             time.sleep(2)
-        
+
     # ----------------------------------------
     # ⭐ Human-like random mouse movement
     # ----------------------------------------
@@ -80,14 +88,12 @@ class ChewyScraperUCD:
                 x = random.randint(0, width - 10)
                 y = random.randint(0, height - 10)
                 actions.move_to_element_with_offset(
-                    self.driver.find_element(By.TAG_NAME, "body"),
-                    x, y
+                    self.driver.find_element(By.TAG_NAME, "body"), x, y
                 ).perform()
                 time.sleep(random.uniform(0.2, 0.4))
         except Exception as e:
             print(f"⚠️  Error in mouse movement: {e}")
             # Don't fail completely, just skip mouse movement
-
 
     # ----------------------------------------
     # ⭐ Slow human-like scrolling
@@ -96,7 +102,9 @@ class ChewyScraperUCD:
         try:
             self._ensure_window()
             for _ in range(random.randint(1, 3)):
-                self.driver.execute_script("window.scrollBy(0, arguments[0]);", random.randint(250, 450))
+                self.driver.execute_script(
+                    "window.scrollBy(0, arguments[0]);", random.randint(250, 450)
+                )
                 time.sleep(random.uniform(0.1, 0.3))
         except Exception as e:
             print(f"⚠️  Error in scrolling: {e}")
@@ -109,18 +117,18 @@ class ChewyScraperUCD:
         try:
             # Ensure driver and window are valid before proceeding
             self._ensure_window()
-            
+
             # Switch to the first window if multiple exist
             if len(self.driver.window_handles) > 0:
                 self.driver.switch_to.window(self.driver.window_handles[0])
-            
+
             self.driver.get(url)
-            
+
             # ------------------------------
             # Wait for initial network activity
             # ------------------------------
             time.sleep(random.uniform(1.0, 1.5))
-                            
+
             # ------------------------------
             # Wait for body to appear
             # ------------------------------
@@ -131,62 +139,67 @@ class ChewyScraperUCD:
             except Exception as e:
                 print(f"❌ ERROR: Page not loaded properly: {e}")
                 return None
-            
+
             # ------------------------------
             # Wait for JS DOM readiness
             # ------------------------------
             try:
                 WebDriverWait(self.driver, 12).until(
-                    lambda d: d.execute_script("return document.readyState") == "complete"
+                    lambda d: d.execute_script("return document.readyState")
+                    == "complete"
                 )
             except Exception:
                 # Don't fail completely if readyState check times out
                 pass
-            
+
             # Verify page loaded successfully
             if not self._is_driver_alive():
                 raise NoSuchWindowException("Window closed after page load")
-            
+
             # ------------------------------
             # Scroll to trigger lazy-loaded content
             # ------------------------------
             self.slow_scroll()
             # time.sleep(random.uniform(1.0, 1.8))
-            
+
             # Check again before getting page source
             if not self._is_driver_alive():
                 raise NoSuchWindowException("Window closed during interaction")
-            
+
             html = self.driver.page_source
-            
+
             # ------------------------------
             # Validate REAL Chewy product page
             # ------------------------------
             soup = BeautifulSoup(html, "html.parser")
-            
+
             # Check for product page
             if soup.select_one("h1[data-testid='product-title-heading']"):
                 print("✅ Product page loaded successfully.")
                 return html
-            
+
             # Check for category/listing page
             if soup.select_one(".kib-product-card"):
                 print("✅ Category/listing page loaded successfully.")
                 return html
-            
+
             # If HTML is too short → likely blocked or incomplete
             if len(html) < 8000:
                 print(f"⚠️ HTML too short ({len(html)} bytes) — retrying…")
                 return None
-            
+
             # If we got here and HTML is long enough, return it anyway
             # (might be a different page type we don't recognize)
             print("⚠️ Page loaded but structure not recognized — returning HTML anyway")
             return html
-            
+
         except (NoSuchWindowException, WebDriverException) as e:
             error_msg = str(e).lower()
-            if "no such window" in error_msg or "target window already closed" in error_msg or "web view not found" in error_msg:
+            if (
+                "no such window" in error_msg
+                or "target window already closed" in error_msg
+                or "web view not found" in error_msg
+            ):
                 try:
                     self._init_driver()
                     time.sleep(3)  # Give browser time to fully initialize
@@ -195,7 +208,7 @@ class ChewyScraperUCD:
                     return None
         except Exception as e:
             print(f"❌ Unexpected error loading page: {e}")
-        
+
         print("❌ FAILED to load page after 4 attempts")
         return None
 
@@ -225,11 +238,9 @@ class ChewyScraperUCD:
             img_el = c.select_one(".kib-product-image img")
             image_url = img_el.get("src") if img_el else None
 
-            products.append({
-                "product_url": link,
-                "page": page_num,
-                "image_url": image_url
-            })
+            products.append(
+                {"product_url": link, "page": page_num, "image_url": image_url}
+            )
 
         return products
 
@@ -252,26 +263,30 @@ class ChewyScraperUCD:
         """Save products to database, skipping duplicates"""
         if not products:
             return 0
-        
+
         db = SessionLocal()
         saved_count = 0
         skipped_count = 0
-        
+
         try:
             for product_data in products:
                 try:
                     # Check if product already exists
-                    existing = db.query(ProductList).filter_by(product_url=product_data["product_url"]).first()
+                    existing = (
+                        db.query(ProductList)
+                        .filter_by(product_url=product_data["product_url"])
+                        .first()
+                    )
                     if existing:
                         skipped_count += 1
                         continue
-                    
+
                     # Create new product
                     product = ProductList(
                         product_url=product_data["product_url"],
                         page_num=product_data["page"],
                         product_image_url=product_data.get("image_url"),
-                        scraped=False
+                        scraped=False,
                     )
                     db.add(product)
                     saved_count += 1
@@ -280,15 +295,17 @@ class ChewyScraperUCD:
                     db.rollback()
                     skipped_count += 1
                     continue
-            
+
             db.commit()
-            print(f"✅ Saved {saved_count} products to database (skipped {skipped_count} duplicates)")
+            print(
+                f"✅ Saved {saved_count} products to database (skipped {skipped_count} duplicates)"
+            )
         except Exception as e:
             db.rollback()
             print(f"❌ Error saving products to database: {e}")
         finally:
             db.close()
-        
+
         return saved_count
 
     # ----------------------------------------
@@ -300,14 +317,14 @@ class ChewyScraperUCD:
         for page_num in range(start, end + 1):
             print(f"\n--- Scraping page {page_num} ---")
             products = self.scrape_page(page_num)
-            
+
             if products:
                 # Save products to database immediately after scraping each page
                 self.save_products_to_db(products)
                 all_products.extend(products)
             else:
                 print(f"⚠️  No products found on page {page_num}")
-            
+
             time.sleep(random.uniform(1.5, 2.5))
 
         print(f"\n✅ Total products scraped: {len(all_products)}")
@@ -319,7 +336,7 @@ class ChewyScraperUCD:
     def extract_all_content(self, element):
         if element is None:
             return None
-        
+
         result_lines = []
 
         # ===========================================================
@@ -329,7 +346,9 @@ class ChewyScraperUCD:
         for table in tables:
             rows = table.find_all("tr")
             for tr in rows:
-                cells = [td.get_text(" ", strip=True) for td in tr.find_all(["th", "td"])]
+                cells = [
+                    td.get_text(" ", strip=True) for td in tr.find_all(["th", "td"])
+                ]
                 if cells:
                     result_lines.append(" | ".join(cells))
             result_lines.append("")  # blank line after each table
@@ -369,11 +388,7 @@ class ChewyScraperUCD:
           - specifications (table from hidden div last section)
         from the kib-truncation-content container.
         """
-        out = {
-            "details": None,
-            "more_details": None,
-            "specifications": None
-        }
+        out = {"details": None, "more_details": None, "specifications": None}
 
         # 1️⃣ Find the base container
         trunc = soup.select_one(".kib-truncation-content")
@@ -392,7 +407,9 @@ class ChewyScraperUCD:
         # --------------------------------------------
         hidden_div = None
         for child in trunc.find_all(recursive=False):
-            if child.name == "div" and child.get("style", "").startswith("display:none"):
+            if child.name == "div" and child.get("style", "").startswith(
+                "display:none"
+            ):
                 hidden_div = child
                 break
 
@@ -417,7 +434,7 @@ class ChewyScraperUCD:
         # --------------------------------------------
         # 5️⃣ Extract MORE_DETAILS (middle sections)
         # --------------------------------------------
-        middle_sections = sections[1:-1]   # exclude first (duplicate) & last (specs)
+        middle_sections = sections[1:-1]  # exclude first (duplicate) & last (specs)
         if middle_sections:
             paras = []
             for sec in middle_sections:
@@ -429,7 +446,9 @@ class ChewyScraperUCD:
     # ----------------------------------------
     # ⭐ Extract product details from HTML
     # ----------------------------------------
-    def extract_product_details(self, html: str, product_url: str, img_link: str = None):
+    def extract_product_details(
+        self, html: str, product_url: str, img_link: str = None
+    ):
         soup = BeautifulSoup(html, "html.parser")
 
         out = {
@@ -439,14 +458,14 @@ class ChewyScraperUCD:
             "product_category": None,
             "price": None,
             "size": None,
-            "details": None,               # KEY BENEFITS
-            "more_details": None,          # DESCRIPTION + MULTI-PARAGRAPH TEXT
-            "specifications": None,        # FULL TABLE
+            "details": None,  # KEY BENEFITS
+            "more_details": None,  # DESCRIPTION + MULTI-PARAGRAPH TEXT
+            "specifications": None,  # FULL TABLE
             "ingredients": None,
             "caloric_content": None,
             "guaranteed_analysis": None,
             "feeding_instructions": None,
-            "transition_instructions": None
+            "transition_instructions": None,
         }
 
         # ===========================================================
@@ -474,29 +493,31 @@ class ChewyScraperUCD:
         size = soup.select_one("h2.kib-swatch__heading strong")
         if size:
             out["size"] = size.get_text(strip=True)
-        
+
         # ===========================================================
         # DETAILS BLOCK (details, more_details, specifications)
         # ===========================================================
         # Check if page loaded properly - verify key elements exist
         trunc_container = soup.select_one("div.kib-truncation-content")
         if not trunc_container:
-            print(f"❌ ERROR: Page structure incomplete - missing kib-truncation-content")
+            print(
+                f"❌ ERROR: Page structure incomplete - missing kib-truncation-content"
+            )
             print(f"❌ ERROR: Page may not have loaded fully")
             return None
-        
+
         # Extract details block using the new approach
         details_block = self.extract_details_block(soup)
         print(details_block)
         out["details"] = details_block["details"]
         out["more_details"] = details_block["more_details"]
         out["specifications"] = details_block["specifications"]
-        
+
         # Verify we got at least some data (if page loaded, we should have details)
         if not details_block["details"]:
             print(f"❌ ERROR: No details extracted - page may be incomplete")
             return None
-        
+
         # ===========================================================
         # INGREDIENTS
         # ===========================================================
@@ -540,14 +561,13 @@ class ChewyScraperUCD:
 
         return out
 
-    
     # ----------------------------------------
     # ⭐ Scrape product details from a product URL
     # ----------------------------------------
     def scrape_product_details(self, product_url: str, img_link: str = None):
         """Scrape detailed product information from a product page"""
         print(f"\n📦 Scraping product details: {product_url}")
-        
+
         html = self.load_page(product_url)
         if not html:
             print(f"❌ ERROR: Failed to load product page: {product_url}")
@@ -555,10 +575,10 @@ class ChewyScraperUCD:
             return None
         # Reload HTML after scrolling
         html = self.driver.page_source
-        
+
         details = self.extract_product_details(html, product_url, img_link)
         return details
-    
+
     # ----------------------------------------
     # ⭐ Save product details to database and update scraped flag
     # ----------------------------------------
@@ -571,10 +591,12 @@ class ChewyScraperUCD:
             if not product:
                 print(f"❌ Product with id {product_id} not found")
                 return False
-            
+
             # Check if details already exist
-            existing_details = db.query(ProductDetails).filter_by(product_id=product_id).first()
-            
+            existing_details = (
+                db.query(ProductDetails).filter_by(product_id=product_id).first()
+            )
+
             if existing_details:
                 # Update existing details
                 for key, value in details.items():
@@ -582,28 +604,28 @@ class ChewyScraperUCD:
                         setattr(existing_details, key, value)
             else:
                 # Create new details
-                product_details = ProductDetails(
-                    product_id=product_id,
-                    **details
-                )
+                product_details = ProductDetails(product_id=product_id, **details)
                 db.add(product_details)
-            
+
             # Update scraped flag
             product.scraped = True
-            
+
             db.commit()
-            print(f"✅ Saved product details for: {details.get('product_name', 'Unknown')}")
+            print(
+                f"✅ Saved product details for: {details.get('product_name', 'Unknown')}"
+            )
             return True
-            
+
         except Exception as e:
             db.rollback()
             print(f"❌ Error saving product details: {e}")
             import traceback
+
             traceback.print_exc()
             return False
         finally:
             db.close()
-    
+
     # ----------------------------------------
     # ⭐ Mark product as skipped
     # ----------------------------------------
@@ -616,22 +638,23 @@ class ChewyScraperUCD:
             if not product:
                 print(f"❌ Product with id {product_id} not found")
                 return False
-            
+
             # Mark as skipped
             product.skipped = True
             db.commit()
             print(f"✅ Marked product {product_id} as skipped")
             return True
-            
+
         except Exception as e:
             db.rollback()
             print(f"❌ Error marking product as skipped: {e}")
             import traceback
+
             traceback.print_exc()
             return False
         finally:
             db.close()
-    
+
     # ----------------------------------------
     # ⭐ Scrape product details by URL (test mode)
     # ----------------------------------------
@@ -650,9 +673,9 @@ class ChewyScraperUCD:
             print("ℹ️  TEST MODE: Data not saved to database")
         else:
             print("❌ Failed to scrape product: KEY_BENEFITS-section not found")
-        
+
         return details
-    
+
     # ----------------------------------------
     # ⭐ Scrape all unscraped products
     # ----------------------------------------
@@ -661,32 +684,35 @@ class ChewyScraperUCD:
         db = SessionLocal()
         try:
             # Get all unscraped products (exclude skipped products)
-            query = db.query(ProductList).filter_by(scraped=False, skipped=False).order_by(ProductList.id)
+            query = (
+                db.query(ProductList)
+                .filter_by(scraped=False, skipped=False)
+                .order_by(ProductList.id)
+            )
             if offset is not None:
                 query = query.offset(offset)
             if limit:
                 query = query.limit(limit)
             unscraped_products = query.all()
-            
+
             total = len(unscraped_products)
             print(f"\n📦 Found {total} unscraped products")
-            
+
             if total == 0:
                 print("✅ All products have been scraped!")
                 return
-            
+
             success_count = 0
             fail_count = 0
-            
+
             for idx, product in enumerate(unscraped_products, 1):
                 print(f"\n[{idx}/{total}] Processing: {product.product_url}")
-                
+
                 try:
                     details = self.scrape_product_details(
-                        product.product_url,
-                        product.product_image_url
+                        product.product_url, product.product_image_url
                     )
-                    
+
                     if details:
                         if self.save_product_details(product.id, details):
                             success_count += 1
@@ -694,27 +720,31 @@ class ChewyScraperUCD:
                             fail_count += 1
                     else:
                         # If details is None, mark product as skipped and continue
-                        print(f"⚠️ No details extracted for product: {product.product_url} - marking as skipped")
+                        print(
+                            f"⚠️ No details extracted for product: {product.product_url} - marking as skipped"
+                        )
                         self.mark_product_as_skipped(product.id)
                         fail_count += 1
                         # Continue to next product instead of stopping
-                    
+
                     # Random delay between products
                     time.sleep(random.uniform(2.0, 4.0))
-                    
+
                 except Exception as e:
                     fail_count += 1
                     print(f"❌ Error scraping product {product.id}: {e}")
                     import traceback
+
                     traceback.print_exc()
-            
+
             print(f"\n✅ Scraping completed!")
             print(f"   Success: {success_count}")
             print(f"   Failed: {fail_count}")
-            
+
         except Exception as e:
             print(f"❌ Error in scrape_all_product_details: {e}")
             import traceback
+
             traceback.print_exc()
         finally:
             db.close()

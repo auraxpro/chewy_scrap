@@ -1,367 +1,585 @@
-# Chewy.com Dog Food Scraper
+# Dog Food Scoring API
 
-A Python project to scrape dog food product data from chewy.com and calculate scores. This project uses Playwright with human-like behavior to bypass anti-bot systems.
+A comprehensive REST API system for scraping, processing, scoring, and serving dog food product data from Chewy.com.
 
-## Project Structure
+## 🌟 Features
+
+- **Web Scraping**: Automated scraping of dog food products from Chewy.com with anti-bot detection
+- **Data Processing**: Normalize and analyze product information (ingredients, categories, processing methods)
+- **Scoring System**: Multi-criteria scoring algorithm evaluating products on:
+  - Ingredient Quality (35%)
+  - Nutritional Value (30%)
+  - Processing Method (20%)
+  - Price-Value Ratio (15%)
+- **REST API**: FastAPI-based endpoints for accessing products, scores, and statistics
+- **Manual Scraping**: Standalone scraping scripts that can be run independently
+- **Distributed Scraping**: Support for multi-computer parallel scraping
+- **Production Ready**: Comprehensive error handling, logging, and health checks
+
+## 📁 Project Structure
 
 ```
 api/
-├── config.py              # Configuration settings
-├── database.py            # Database models and setup
-├── scraper.py             # Playwright scraper with human-like behavior
-├── main.py                # Main entry point
-├── monitor_scraper.py     # Auto-restart monitor script
-├── distribute_work.py     # Work distribution script for multi-computer scraping
-├── export_data.py         # Export scraped data to JSON
-├── import_data.py         # Import/merge data from JSON exports
-├── requirements.txt       # Python dependencies
-├── docker-compose.yml     # PostgreSQL Docker setup
-└── README.md              # This file
+├── app/                           # Main application package
+│   ├── __init__.py
+│   ├── main.py                    # FastAPI application entry point
+│   ├── config.py                  # Configuration management
+│   │
+│   ├── models/                    # Database models (SQLAlchemy ORM)
+│   │   ├── __init__.py
+│   │   ├── database.py            # Database setup & session management
+│   │   ├── product.py             # ProductList & ProductDetails models
+│   │   └── score.py               # ProductScore & ScoreComponent models
+│   │
+│   ├── schemas/                   # Pydantic schemas (API contracts)
+│   │   ├── __init__.py
+│   │   ├── product.py             # Product request/response schemas
+│   │   └── score.py               # Score request/response schemas
+│   │
+│   ├── api/                       # REST API endpoints
+│   │   ├── __init__.py
+│   │   ├── dependencies.py        # Dependency injection
+│   │   └── v1/
+│   │       ├── __init__.py
+│   │       ├── router.py          # Main API router
+│   │       ├── health.py          # Health check endpoints
+│   │       ├── products.py        # Product endpoints
+│   │       └── scores.py          # Score endpoints
+│   │
+│   ├── scraper/                   # Web scraping module
+│   │   ├── __init__.py
+│   │   ├── chewy_scraper.py       # Main Chewy scraper
+│   │   ├── monitor.py             # Auto-restart monitor
+│   │   ├── distribute_work.py     # Multi-computer distribution
+│   │   ├── export_data.py         # Data export utility
+│   │   └── import_data.py         # Data import utility
+│   │
+│   ├── processors/                # Data processing & normalization
+│   │   ├── __init__.py
+│   │   └── base_processor.py      # Abstract base processor
+│   │       # TODO: Add specific processors:
+│   │       # - processing_detector.py
+│   │       # - ingredient_normalizer.py
+│   │       # - category_normalizer.py
+│   │       # - packaging_estimator.py
+│   │
+│   ├── scoring/                   # Scoring system
+│   │   ├── __init__.py
+│   │   └── base_scorer.py         # Abstract base scorer
+│   │       # TODO: Add specific scorers:
+│   │       # - ingredient_scorer.py
+│   │       # - nutrition_scorer.py
+│   │       # - processing_scorer.py
+│   │       # - price_value_scorer.py
+│   │
+│   ├── services/                  # Business logic layer
+│   │   ├── __init__.py
+│   │   ├── product_service.py     # Product CRUD & search
+│   │   └── scoring_service.py     # Score calculation & retrieval
+│   │
+│   ├── core/                      # Core utilities
+│   │   ├── __init__.py
+│   │   └── # TODO: Add core utilities
+│   │
+│   └── utils/                     # Helper utilities
+│       ├── __init__.py
+│       └── # TODO: Add helper functions
+│
+├── scripts/                       # Standalone CLI scripts
+│   ├── __init__.py
+│   └── scrape_products.py         # Scraping script
+│       # TODO: Add more scripts:
+│       # - process_products.py
+│       # - calculate_scores.py
+│
+├── tests/                         # Test suite
+│   ├── __init__.py
+│   ├── test_api/
+│   ├── test_processors/
+│   ├── test_scoring/
+│   └── test_services/
+│
+├── docs/                          # Documentation
+│   └── # TODO: Add documentation
+│
+├── .env.example                   # Environment variables template
+├── .gitignore
+├── docker-compose.yml             # PostgreSQL container
+├── requirements.txt               # Python dependencies
+└── README.md                      # This file
 ```
 
-## Prerequisites
+## 🚀 Quick Start
 
-- Python 3.10.12
-- Docker and Docker Compose
-- Virtual environment (venv)
+### Prerequisites
 
-## Setup Instructions
+- Python 3.10+
+- Docker & Docker Compose
+- Chrome/Chromium browser (for scraping)
 
-### 1. Create and activate virtual environment
+### 1. Clone and Setup
 
 ```bash
+# Clone the repository
+cd api
+
+# Create virtual environment
 python3.10 -m venv .venv
-source .venv/bin/activate  # On macOS/Linux
-# or
-.venv\Scripts\activate  # On Windows
-```
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-### 2. Install Python dependencies
-
-```bash
+# Install dependencies
 pip install -r requirements.txt
-```
 
-### 3. Install Playwright browsers
-
-```bash
+# Install Playwright browsers (for scraping)
 playwright install chromium
 ```
 
-### 4. Start PostgreSQL database
+### 2. Configure Environment
 
 ```bash
+# Copy environment template
+cp .env.example .env
+
+# Edit .env with your settings (database credentials, API config, etc.)
+nano .env
+```
+
+### 3. Start Database
+
+```bash
+# Start PostgreSQL container
 docker-compose up -d
+
+# Verify database is running
+docker ps
 ```
 
-This will start a PostgreSQL container on port 5432 with:
-- Database: `chewy_db`
-- User: `chewy_user`
-- Password: `chewy_password`
-
-### 5. (Optional) Create .env file
-
-Create a `.env` file in the project root if you want to customize database settings:
-
-```
-DATABASE_URL=postgresql://chewy_user:chewy_password@localhost:5432/chewy_db
-POSTGRES_USER=chewy_user
-POSTGRES_PASSWORD=chewy_password
-POSTGRES_DB=chewy_db
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-```
-
-## Usage
-
-### 1. Scrape Product List
-
-Scrape product URLs from listing pages:
+### 4. Initialize Database
 
 ```bash
-python main.py
+# Run FastAPI application (will auto-initialize database)
+python -m uvicorn app.main:app --reload
 ```
 
-This will:
-1. Initialize the database tables
-2. Scrape all dog food product pages (1-138) from chewy.com
-3. Extract product URLs and image URLs
-4. Save them to PostgreSQL database
+### 5. Access API
 
-**Test mode** (scrape only first page):
-```bash
-python main.py --test
-# or
-python main.py -t
-```
+- **API Documentation**: http://localhost:8000/docs
+- **Alternative Docs**: http://localhost:8000/redoc
+- **Health Check**: http://localhost:8000/health
 
-### 2. Scrape Product Details
+## 📊 Usage
 
-After scraping the product list, scrape detailed product information:
+### 🎯 Unified CLI (Recommended)
+
+The easiest way to run all operations is using the **unified CLI tool**:
 
 ```bash
-python main.py --details
-# or
-python main.py -d
+# Using the convenient wrapper (recommended)
+python cli.py --help
+
+# Or via scripts directory
+python scripts/main.py --help
+
+# Show all available commands
+python cli.py --help
+
+# Scrape product list (pages 1-138)
+python cli.py --scrape
+
+# Scrape product details
+python cli.py --scrape --details
+
+# Scrape with limit
+python cli.py --scrape --details --limit 100
+
+# Test mode (first 5 products)
+python cli.py --scrape --details --test
+
+# Process products
+python cli.py --process
+
+# Calculate scores
+python cli.py --score
+
+# Run complete pipeline (scrape → process → score)
+python cli.py --all
+
+# Show statistics
+python cli.py --stats
+
+# Process single product
+python cli.py --process --product-id 123
+
+# Force recalculate scores
+python cli.py --score --force --limit 50
 ```
 
-This will scrape all products that haven't been scraped yet (`scraped=False`).
+**Note:** Use `python cli.py` (shorter) or `python scripts/main.py` (both work the same way)
 
-**Limit the number of products to scrape:**
-```bash
-python main.py --details --limit 10
-# or
-python main.py -d -l 10
-```
+### Running the API Server
 
-**Test mode** (scrape a single product by URL):
-```bash
-python main.py --details --test-url "https://www.chewy.com/american-journey-grain-free-salmon/dp/108423"
-# or
-python main.py -d -tu "https://www.chewy.com/american-journey-grain-free-salmon/dp/108423"
-```
-
-### 3. Auto-Restart Monitor (Recommended for Long-Running Scrapes)
-
-The `monitor_scraper.py` script automatically monitors the scraper output and restarts it when timeout errors are detected. This is especially useful for long-running scraping sessions.
-
-**Basic usage:**
-```bash
-python monitor_scraper.py --details
-```
-
-**With limit:**
-```bash
-python monitor_scraper.py --details --limit 100
-```
-
-**Monitor options:**
-```bash
-python monitor_scraper.py --details --max-restarts 20 --cooldown 10
-```
-
-- `--max-restarts N`: Maximum number of automatic restarts (default: 10)
-- `--cooldown N`: Seconds to wait before restarting (default: 5)
-
-**Features:**
-- ✅ Real-time output monitoring
-- ✅ Automatic detection of timeout errors
-- ✅ Graceful process termination and restart
-- ✅ Configurable restart limits and cooldown periods
-- ✅ Timestamped logging of all events
-- ✅ Works on both Unix and Windows systems
-
-**Example output:**
-```
-[2024-01-15 10:30:45] ℹ️ Starting scraper: python main.py --details
-[2024-01-15 10:35:12] ❌ Timeout error detected: timeout: Timed out receiving message from renderer
-[2024-01-15 10:35:12] 🔄 Restarting scraper (attempt 1/10)...
-[2024-01-15 10:35:17] ℹ️ Starting scraper: python main.py --details
-```
-
-### 4. Multi-Computer Scraping
-
-When scraping large datasets, you can distribute the work across multiple computers to speed up the process.
-
-#### Step 1: Distribute Work
-
-On the master computer (with the full product list database), run:
+The API server and manual operations are **separate processes**. You can run the API without scraping, and vice versa.
 
 ```bash
-python distribute_work.py --computers 3 --chunk-size 1200
+# Development mode (with auto-reload)
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# Production mode
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
-This will show you the work assignments for each computer:
-```
-🖥️  Computer 1:
-   Offset: 0
-   Limit: 1200
-   Command: python main.py --details --offset 0 --limit 1200
+### Alternative: Individual Scripts
 
-🖥️  Computer 2:
-   Offset: 1200
-   Limit: 1200
-   Command: python main.py --details --offset 1200 --limit 1200
+You can also use individual scripts if needed:
 
-🖥️  Computer 3:
-   Offset: 2400
-   Limit: 1200
-   Command: python main.py --details --offset 2400 --limit 1200
-```
-
-#### Step 2: Set Up Each Computer
-
-On each computer:
-
-1. **Copy the project files** (scraper.py, main.py, database.py, config.py, etc.)
-2. **Set up the database** (each computer can have its own local database or connect to a shared one)
-3. **Copy the product list** - Ensure each computer has the same `products_list` table with all products
-
-#### Step 3: Run Scraping on Each Computer
-
-On Computer 1:
-```bash
-python monitor_scraper.py --details --offset 0 --limit 1200
-```
-
-On Computer 2:
-```bash
-python monitor_scraper.py --details --offset 1200 --limit 1200
-```
-
-On Computer 3:
-```bash
-python monitor_scraper.py --details --offset 2400 --limit 1200
-```
-
-#### Step 4: Export Data from Each Computer
-
-After scraping completes on each computer, export the data:
+#### Scrape Product List (URLs)
 
 ```bash
-python export_data.py --output computer1_export.json
+# Scrape all pages (1-138)
+python scripts/scrape_products.py
+
+# Test mode (scrape only first page)
+python scripts/scrape_products.py --test
 ```
 
-This creates a JSON file with all scraped products and their details.
-
-#### Step 5: Import Data into Master Database
-
-On the master computer, import data from each computer:
+#### Scrape Product Details
 
 ```bash
-# Import from Computer 1
-python import_data.py computer1_export.json
+# Scrape all unscraped products
+python scripts/scrape_products.py --details
 
-# Import from Computer 2
-python import_data.py computer2_export.json
+# Limit number of products
+python scripts/scrape_products.py --details --limit 100
 
-# Import from Computer 3
-python import_data.py computer3_export.json
+# Start from offset
+python scripts/scrape_products.py --details --offset 100 --limit 50
+
+# Test single product
+python scripts/scrape_products.py --details --test-url "https://www.chewy.com/product/dp/12345"
 ```
 
-The import script will:
-- ✅ Skip duplicate products (based on product_url)
-- ✅ Update scraped flags
-- ✅ Handle foreign key relationships correctly
-- ✅ Show detailed import statistics
-
-**Dry run (preview without importing):**
-```bash
-python import_data.py computer1_export.json --dry-run
-```
-
-#### Alternative: Shared Database Approach
-
-If all computers can access the same database:
-
-1. **Set up shared database** (PostgreSQL on a server accessible by all computers)
-2. **Update config.py** on each computer to point to the shared database
-3. **Run scraping with offsets** - Each computer scrapes different ranges
-4. **No import needed** - Data is automatically in the shared database
-
-**Advantages:**
-- ✅ No need to export/import
-- ✅ Real-time progress visibility
-- ✅ Automatic conflict resolution
-
-**Disadvantages:**
-- ⚠️ Requires network access to shared database
-- ⚠️ Potential database connection issues
-- ⚠️ All computers must be online
-
-### Database Schema
-
-#### `products_list` table:
-- `id`: Primary key (auto-increment)
-- `product_url`: Product detail page URL (unique)
-- `page_num`: Page number where the product was found
-- `scraped`: Boolean flag indicating if product details have been scraped (default: False)
-- `product_image_url`: URL of the product image
-
-#### `product_details` table:
-- `id`: Primary key (auto-increment)
-- `product_id`: Foreign key to `products_list.id` (unique)
-- `product_category`: Product category from breadcrumbs
-- `product_name`: Product name
-- `img_link`: Image URL (copied from product list)
-- `product_url`: Product URL (copied from product list)
-- `price`: Product price
-- `size`: Product size
-- `details`: Key benefits/details (text)
-- `more_details`: Additional details including specifications (text)
-- `ingredients`: Ingredients list (text)
-- `caloric_content`: Caloric content information (text)
-- `guaranteed_analysis`: Guaranteed analysis table (text)
-- `feeding_instructions`: Feeding instructions (text)
-- `transition_instructions`: Transition instructions (text)
-
-### Check database
-
-You can connect to the database to verify the data:
+#### Auto-Restart Monitor (For Long Sessions)
 
 ```bash
-docker exec -it chewy_scraper_db psql -U chewy_user -d chewy_db
+# Monitor and auto-restart on errors
+python app/scraper/monitor.py --details --limit 1000
+
+# With custom restart limits
+python app/scraper/monitor.py --details --max-restarts 20 --cooldown 10
 ```
 
-Then run SQL queries:
-```sql
--- Check product list
-SELECT COUNT(*) FROM products_list;
-SELECT * FROM products_list LIMIT 10;
+### API Endpoints
 
--- Check product details
-SELECT COUNT(*) FROM product_details;
-SELECT * FROM product_details LIMIT 10;
+#### Products
 
--- Check unscraped products
-SELECT COUNT(*) FROM products_list WHERE scraped = false;
+```bash
+# Get all products (paginated)
+GET /api/v1/products?page=1&page_size=50
 
--- Join product list with details
-SELECT pl.product_url, pd.product_name, pd.price, pd.size
-FROM products_list pl
-LEFT JOIN product_details pd ON pl.id = pd.product_id
-LIMIT 10;
+# Get product by ID
+GET /api/v1/products/{product_id}
+
+# Search products
+POST /api/v1/products/search
+{
+  "query": "salmon",
+  "category": "dry_kibble",
+  "min_score": 80,
+  "page": 1,
+  "page_size": 50
+}
+
+# Get products by category
+GET /api/v1/products/category/dry_kibble?page=1&page_size=50
+
+# Get product statistics
+GET /api/v1/products/stats/overview
 ```
 
-## Features
+#### Scores
 
-- **Human-like behavior**: Random delays, scrolling patterns, and realistic browser settings
-- **Anti-bot bypass**: Uses Playwright with automation detection disabled
-- **Duplicate prevention**: Checks for existing products before inserting
-- **Error handling**: Continues scraping even if individual products fail
-- **Progress tracking**: Prints progress information during scraping
+```bash
+# Calculate score for a product
+POST /api/v1/scores/calculate
+{
+  "product_id": 1,
+  "force_recalculate": false
+}
 
-## Notes
+# Get score by product ID
+GET /api/v1/scores/product/{product_id}
 
-- The scraper runs with `headless=False` by default to better mimic human behavior. You can change this in `scraper.py` if needed.
-- Scraping all 138 pages may take a significant amount of time due to human-like delays.
-- Make sure Docker is running before starting the scraper.
+# Get top scored products
+GET /api/v1/scores/top?limit=10&category=dry_kibble
 
-## Product Detail Scraping
+# Get score statistics
+GET /api/v1/scores/stats/overview
 
-The product detail scraper extracts the following information from each product page:
+# Batch calculate scores
+POST /api/v1/scores/calculate/batch
+{
+  "product_ids": [1, 2, 3, 4, 5],
+  "force_recalculate": false
+}
+```
 
-1. **Product Category**: Extracted from breadcrumbs (third level)
-2. **Product Name**: From the product title heading
-3. **Image Link**: Copied from the product list
-4. **Product URL**: Copied from the product list
-5. **Price**: Current Chewy price
-6. **Size**: Selected product size
-7. **Details**: Key benefits and features (bullet points)
-8. **More Details**: Product description and specifications table
-9. **Ingredients**: Full ingredients list
-10. **Caloric Content**: Calorie information per kg and cup
-11. **Guaranteed Analysis**: Nutritional analysis table
-12. **Feeding Instructions**: Feeding guide table and additional notes
-13. **Transition Instructions**: Instructions for transitioning to this food
+#### Health Checks
 
-After successfully scraping a product, the `scraped` flag in `products_list` is automatically set to `true`.
+```bash
+# Basic health check
+GET /api/v1/health/
 
-## Next Steps
+# Detailed health check (includes database)
+GET /api/v1/health/detailed
 
-After scraping product details, you can:
-1. Process data for scoring system
-2. Calculate scores for each product
-3. Analyze nutritional information
-4. Generate reports
+# Kubernetes readiness probe
+GET /api/v1/health/ready
 
+# Kubernetes liveness probe
+GET /api/v1/health/live
+```
+
+## 🔧 Development
+
+### Adding New Processors
+
+Create a new processor by inheriting from `BaseProcessor`:
+
+```python
+# app/processors/ingredient_normalizer.py
+from app.processors.base_processor import BaseProcessor
+from app.models.product import ProductList
+
+class IngredientNormalizer(BaseProcessor):
+    def process(self, product: ProductList) -> dict:
+        """Normalize ingredient data"""
+        if not product.details or not product.details.ingredients:
+            return {}
+        
+        # Your normalization logic here
+        normalized_ingredients = self._normalize_ingredients(
+            product.details.ingredients
+        )
+        
+        return {
+            "normalized_ingredients": normalized_ingredients
+        }
+    
+    def _normalize_ingredients(self, ingredients: str) -> str:
+        # Implementation
+        pass
+```
+
+### Adding New Scorers
+
+Create a new scorer by inheriting from `BaseScorer`:
+
+```python
+# app/scoring/ingredient_scorer.py
+from app.scoring.base_scorer import BaseScorer
+from app.models.product import ProductList
+
+class IngredientScorer(BaseScorer):
+    def get_component_name(self) -> str:
+        return "ingredient_quality"
+    
+    def calculate_score(self, product: ProductList) -> float:
+        """Calculate ingredient quality score (0-100)"""
+        if not product.details or not product.details.ingredients:
+            return 0.0
+        
+        score = 0.0
+        
+        # Your scoring logic here
+        # - Check for quality meat sources
+        # - Check for whole food ingredients
+        # - Penalize for fillers, by-products, etc.
+        
+        return self.validate_score(score)
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+pytest
+
+# Run with coverage
+pytest --cov=app --cov-report=html
+
+# Run specific test file
+pytest tests/test_api/test_products.py
+
+# Run specific test
+pytest tests/test_api/test_products.py::test_get_product
+```
+
+### Code Quality
+
+```bash
+# Format code with black
+black app/ scripts/ tests/
+
+# Sort imports with isort
+isort app/ scripts/ tests/
+
+# Lint with flake8
+flake8 app/ scripts/ tests/
+
+# Type checking with mypy
+mypy app/
+```
+
+## 🗄️ Database Schema
+
+### ProductList
+- Basic product information and scraping metadata
+- Fields: `id`, `product_url`, `page_num`, `scraped`, `processed`, `scored`, `skipped`
+
+### ProductDetails
+- Detailed product information
+- Fields: `product_name`, `price`, `size`, `ingredients`, `guaranteed_analysis`, etc.
+
+### ProductScore
+- Overall product scores
+- Fields: `product_id`, `total_score`, `score_version`, `calculated_at`
+
+### ScoreComponent
+- Individual scoring components
+- Fields: `score_id`, `component_name`, `component_score`, `weight`, `weighted_score`
+
+## 🔐 Environment Variables
+
+See `.env.example` for all available configuration options.
+
+Key variables:
+- `DATABASE_URL`: PostgreSQL connection string
+- `DEBUG`: Enable debug mode
+- `CORS_ORIGINS`: Allowed CORS origins
+- `SCORE_WEIGHT_*`: Scoring weights (must sum to 1.0)
+- `SCRAPER_HEADLESS`: Run scraper in headless mode
+
+## 📦 Multi-Computer Scraping
+
+For large-scale scraping, distribute work across multiple computers:
+
+```bash
+# 1. On master computer, calculate work distribution
+python app/scraper/distribute_work.py --computers 3 --chunk-size 1200
+
+# 2. On each computer, run assigned range
+# Computer 1:
+python app/scraper/monitor.py --details --offset 0 --limit 1200
+
+# Computer 2:
+python app/scraper/monitor.py --details --offset 1200 --limit 1200
+
+# 3. Export data from each computer
+python app/scraper/export_data.py --output computer1_export.json
+
+# 4. Import data on master computer
+python app/scraper/import_data.py computer1_export.json
+python app/scraper/import_data.py computer2_export.json
+```
+
+## 🐳 Docker Deployment
+
+```bash
+# Build and run with Docker Compose
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop services
+docker-compose down
+```
+
+## 📈 Performance Tips
+
+1. **Database Indexing**: Ensure indexes on frequently queried fields
+2. **Connection Pooling**: Configured in `app/models/database.py`
+3. **Pagination**: Always use pagination for large datasets
+4. **Caching**: Consider adding Redis for frequently accessed data
+5. **Background Tasks**: Use Celery for long-running score calculations
+
+## 🤝 Contributing
+
+1. Create a feature branch
+2. Make your changes
+3. Add tests
+4. Run code quality checks
+5. Submit a pull request
+
+## 📝 TODO
+
+### High Priority
+- [ ] Implement specific processor classes (ingredient normalizer, category normalizer, etc.)
+- [ ] Implement specific scorer classes (ingredient scorer, nutrition scorer, etc.)
+- [ ] Add comprehensive test coverage
+- [ ] Add API authentication/authorization
+- [ ] Add rate limiting
+
+### Medium Priority
+- [ ] Add Celery for background tasks
+- [ ] Add Redis for caching
+- [ ] Add Alembic migrations
+- [ ] Add API versioning documentation
+- [ ] Add frontend integration guide
+
+### Low Priority
+- [ ] Add GraphQL API (optional)
+- [ ] Add WebSocket support for real-time updates (optional)
+- [ ] Add data export to CSV/Excel
+- [ ] Add product comparison feature
+- [ ] Add recommendation system
+
+## 🔄 Workflow
+
+### Typical Usage Flow
+
+**Using Unified CLI (Easiest):**
+```bash
+# Run everything at once
+python cli.py --all
+
+# Or step by step:
+python cli.py --scrape --details    # 1. Scrape data
+python cli.py --process              # 2. Process data
+python cli.py --score                # 3. Calculate scores
+uvicorn app.main:app --reload        # 4. Start API
+```
+
+**Using Individual Scripts:**
+```bash
+# 1. Scraping (Manual, as needed)
+python scripts/scrape_products.py --details
+
+# 2. Processing (After scraping)
+python scripts/process_products.py
+
+# 3. Scoring (After processing)
+python scripts/calculate_scores.py
+
+# 4. API (Always running for frontend)
+uvicorn app.main:app --reload
+```
+
+### Notes
+
+- **API is independent**: The API serves existing data from the database
+- **Scraping is manual**: Run scraping scripts when you need fresh data
+- **No background tasks**: All processing happens through CLI scripts
+- **Simple workflow**: Scrape → Process → Score → Serve via API
+
+## 📄 License
+
+[Add your license here]
+
+## 📞 Support
+
+For issues, questions, or contributions, please [open an issue](link-to-issues).
+
+---
+
+**Built with ❤️ for dog lovers and their furry friends! 🐕**
