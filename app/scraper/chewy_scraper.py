@@ -127,7 +127,7 @@ class ChewyScraperUCD:
             # ------------------------------
             # Wait for initial network activity
             # ------------------------------
-            time.sleep(random.uniform(1.0, 1.5))
+            time.sleep(random.uniform(1.5, 2.5))
 
             # ------------------------------
             # Wait for body to appear

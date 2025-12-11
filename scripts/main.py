@@ -16,6 +16,7 @@ Commands:
     --sourcing             Process sourcing integrity (use with --process)
     --processing           Process processing methods (use with --process)
     --ingredient-quality   Process ingredient quality (use with --process)
+    --longevity-additives   Process longevity additives (use with --process)
     --score, -sc           Calculate quality scores for products
     --all, -a              Run complete pipeline (scrape → process → score)
     --stats                Show statistics for all stages
@@ -27,6 +28,7 @@ Options:
     --test, -t             Test mode (limited scope)
     --product-id, -pid N   Process/score single product by ID
     --test-url, -tu URL    Test scrape single product by URL
+    --product-url, --product_url, -pu URL Scrape single product by URL (must exist in DB)
     --reprocess-category C Reprocess specific category (Raw/Fresh/Dry/Wet/Other)
     --reprocess-sourcing S Reprocess sourcing integrity (Human Grade (organic)/Human Grade/Feed Grade/Other)
     --reprocess-processing P Reprocess processing method (Freeze Dried/Extruded/Baked/etc.)
@@ -45,6 +47,10 @@ Examples:
 
     # Test scrape first page only
     python scripts/main.py --scrape --test
+
+    # Scrape single product by URL (must exist in product_list)
+    python scripts/main.py --scrape --details --product-url https://www.chewy.com/...
+    python cli.py --scrape --details --product_url https://www.chewy.com/...
 
     # Process all unprocessed products
     python scripts/main.py --process
@@ -79,6 +85,10 @@ Examples:
 
     # Reprocess specific quality class
     python scripts/main.py --process --ingredient-quality --reprocess-quality "High"
+
+    # Process longevity additives
+    python scripts/main.py --process --longevity-additives
+    python scripts/main.py --process --longevity-additives --limit 100
 
     # Calculate scores for all unscored products
     python scripts/main.py --score
@@ -137,6 +147,7 @@ class UnifiedCLI:
             "sourcing": False,
             "processing": False,
             "ingredient_quality": False,
+            "longevity_additives": False,
             "score": False,
             "all": False,
             "stats": False,
@@ -147,6 +158,7 @@ class UnifiedCLI:
             "test": False,
             "product_id": None,
             "test_url": None,
+            "product_url": None,
             "reprocess_category": None,
             "reprocess_sourcing": None,
             "reprocess_processing": None,
@@ -179,6 +191,9 @@ class UnifiedCLI:
                 i += 1
             elif arg in ["--ingredient-quality"]:
                 args["ingredient_quality"] = True
+                i += 1
+            elif arg in ["--longevity-additives"]:
+                args["longevity_additives"] = True
                 i += 1
             elif arg in ["--score", "-sc"]:
                 args["score"] = True
@@ -225,6 +240,10 @@ class UnifiedCLI:
 
             elif arg in ["--test-url", "-tu"] and i + 1 < len(sys.argv):
                 args["test_url"] = sys.argv[i + 1]
+                i += 2
+
+            elif arg in ["--product-url", "--product_url", "-pu"] and i + 1 < len(sys.argv):
+                args["product_url"] = sys.argv[i + 1]
                 i += 2
 
             elif arg in ["--reprocess-category"] and i + 1 < len(sys.argv):
@@ -396,7 +415,52 @@ class UnifiedCLI:
         try:
             self.scraper = ChewyScraperUCD()
 
-            if self.args["test_url"]:
+            if self.args["product_url"]:
+                # Scrape single product by URL (must exist in DB)
+                from app.models.database import SessionLocal
+                from app.models.product import ProductList
+
+                product_url = self.args["product_url"]
+                print(f"\n📦 Scraping product by URL")
+                print(f"   URL: {product_url}")
+
+                db = SessionLocal()
+                try:
+                    # Check if URL exists in product_list
+                    product = (
+                        db.query(ProductList)
+                        .filter_by(product_url=product_url)
+                        .first()
+                    )
+
+                    if not product:
+                        print(f"\n⚠️  Product URL not found in database")
+                        print(f"   URL: {product_url}")
+                        print(f"   Skipping...")
+                        return
+
+                    print(f"   Found product ID: {product.id}")
+                    print(f"   Product already scraped: {product.scraped}")
+
+                    # Scrape product details
+                    details = self.scraper.scrape_product_details(
+                        product.product_url, product.product_image_url
+                    )
+
+                    if details:
+                        # Save to database
+                        if self.scraper.save_product_details(product.id, details):
+                            print(f"\n✅ Successfully scraped and saved product details")
+                        else:
+                            print(f"\n❌ Failed to save product details")
+                    else:
+                        print(f"\n⚠️  No details extracted - marking as skipped")
+                        self.scraper.mark_product_as_skipped(product.id)
+
+                finally:
+                    db.close()
+
+            elif self.args["test_url"]:
                 # Test single product by URL
                 print(f"\n🧪 Test mode: Scraping single product")
                 print(f"   URL: {self.args['test_url']}")
@@ -912,6 +976,87 @@ class UnifiedCLI:
             if self.db:
                 self.db.close()
 
+    def run_longevity_additives_processing(self):
+        """Run longevity additives identification"""
+        from app.processors.longevity_additives_processor import (
+            LongevityAdditivesProcessor,
+        )
+
+        print("\n" + "=" * 70)
+        print("🔧 LONGEVITY ADDITIVES PROCESSING")
+        print("=" * 70)
+
+        self.db = SessionLocal()
+        try:
+            processor = LongevityAdditivesProcessor(
+                self.db, processor_version="v1.0.0"
+            )
+
+            # Handle single product
+            if self.args["product_id"]:
+                from app.models.product import ProductDetails
+
+                pid = self.args["product_id"]
+                print(f"\nProcessing single product (ID={pid})")
+                # Try treating as ProductDetails.id first
+                detail = (
+                    self.db.query(ProductDetails)
+                    .filter(ProductDetails.id == pid)
+                    .first()
+                )
+                if not detail:
+                    # Fallback: treat as ProductList.id (ProductDetails.product_id)
+                    detail = (
+                        self.db.query(ProductDetails)
+                        .filter(ProductDetails.product_id == pid)
+                        .first()
+                    )
+                if not detail:
+                    print(f"\n❌ Could not find ProductDetails for ID={pid}")
+                    print(
+                        "   Provide a ProductDetails.id or a ProductList.id that has details."
+                    )
+                    return
+                try:
+                    result = processor.process_single(detail.id)
+                    print(f"\n✅ Success!")
+                    print(f"  Product Detail ID:     {result.product_detail_id}")
+                    print(f"  Longevity Additives:    {result.longevity_additives}")
+                    print(f"  Additives Count:        {result.longevity_additives_count}")
+                    print(f"  Processed At:          {result.processed_at}")
+                except Exception as e:
+                    print(f"\n❌ Error: {e}")
+                return
+
+            # Handle batch processing
+            print(f"\nProcessing all products")
+            if self.args["limit"]:
+                print(f"Limit: {self.args['limit']}")
+            print(f"Mode: {'Reprocess all' if self.args['force'] else 'Skip existing'}")
+
+            results = processor.process_all(
+                limit=self.args["limit"], skip_existing=not self.args["force"]
+            )
+
+            print(f"\n✅ Processing completed!")
+            print(f"   Total:   {results['total']}")
+            print(f"   Success: {results['success']}")
+            print(f"   Failed:  {results['failed']}")
+
+            # Show statistics
+            print()
+            processor.print_statistics()
+
+        except Exception as e:
+            print(f"\n❌ Processing error: {e}")
+            import traceback
+
+            traceback.print_exc()
+            raise
+        finally:
+            if self.db:
+                self.db.close()
+
     def _process_single_product(self, pid: int):
         """Process a single product"""
         product = (
@@ -1163,6 +1308,8 @@ class UnifiedCLI:
                         self.run_processing_method_processing()
                     elif self.args["ingredient_quality"]:
                         self.run_ingredient_quality_processing()
+                    elif self.args["longevity_additives"]:
+                        self.run_longevity_additives_processing()
                     else:
                         self.run_process()
 
