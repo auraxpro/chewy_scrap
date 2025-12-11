@@ -17,6 +17,7 @@ Commands:
     --processing           Process processing methods (use with --process)
     --ingredient-quality   Process ingredient quality (use with --process)
     --longevity-additives   Process longevity additives (use with --process)
+    --nutritionally-adequate Process nutritionally adequate status (use with --process)
     --score, -sc           Calculate quality scores for products
     --all, -a              Run complete pipeline (scrape → process → score)
     --stats                Show statistics for all stages
@@ -90,6 +91,10 @@ Examples:
     python scripts/main.py --process --longevity-additives
     python scripts/main.py --process --longevity-additives --limit 100
 
+    # Process nutritionally adequate status
+    python scripts/main.py --process --nutritionally-adequate
+    python scripts/main.py --process --nutritionally-adequate --limit 100
+
     # Calculate scores for all unscored products
     python scripts/main.py --score
 
@@ -148,6 +153,7 @@ class UnifiedCLI:
             "processing": False,
             "ingredient_quality": False,
             "longevity_additives": False,
+            "nutritionally_adequate": False,
             "score": False,
             "all": False,
             "stats": False,
@@ -194,6 +200,9 @@ class UnifiedCLI:
                 i += 1
             elif arg in ["--longevity-additives"]:
                 args["longevity_additives"] = True
+                i += 1
+            elif arg in ["--nutritionally-adequate"]:
+                args["nutritionally_adequate"] = True
                 i += 1
             elif arg in ["--score", "-sc"]:
                 args["score"] = True
@@ -1057,6 +1066,87 @@ class UnifiedCLI:
             if self.db:
                 self.db.close()
 
+    def run_nutritionally_adequate_processing(self):
+        """Run nutritionally adequate status classification"""
+        from app.processors.nutritionally_adequate_processor import (
+            NutritionallyAdequateProcessor,
+        )
+
+        print("\n" + "=" * 70)
+        print("🔧 NUTRITIONALLY ADEQUATE PROCESSING")
+        print("=" * 70)
+
+        self.db = SessionLocal()
+        try:
+            processor = NutritionallyAdequateProcessor(
+                self.db, processor_version="v1.0.0"
+            )
+
+            # Handle single product
+            if self.args["product_id"]:
+                from app.models.product import ProductDetails
+
+                pid = self.args["product_id"]
+                print(f"\nProcessing single product (ID={pid})")
+                # Try treating as ProductDetails.id first
+                detail = (
+                    self.db.query(ProductDetails)
+                    .filter(ProductDetails.id == pid)
+                    .first()
+                )
+                if not detail:
+                    # Fallback: treat as ProductList.id (ProductDetails.product_id)
+                    detail = (
+                        self.db.query(ProductDetails)
+                        .filter(ProductDetails.product_id == pid)
+                        .first()
+                    )
+                if not detail:
+                    print(f"\n❌ Could not find ProductDetails for ID={pid}")
+                    print(
+                        "   Provide a ProductDetails.id or a ProductList.id that has details."
+                    )
+                    return
+                try:
+                    result = processor.process_single(detail.id)
+                    print(f"\n✅ Success!")
+                    print(f"  Product Detail ID:     {result.product_detail_id}")
+                    print(f"  Nutritionally Adequate: {result.nutritionally_adequate}")
+                    print(f"  Reason:                {result.nutritionally_adequate_reason}")
+                    print(f"  Processed At:          {result.processed_at}")
+                except Exception as e:
+                    print(f"\n❌ Error: {e}")
+                return
+
+            # Handle batch processing
+            print(f"\nProcessing all products")
+            if self.args["limit"]:
+                print(f"Limit: {self.args['limit']}")
+            print(f"Mode: {'Reprocess all' if self.args['force'] else 'Skip existing'}")
+
+            results = processor.process_all(
+                limit=self.args["limit"], skip_existing=not self.args["force"]
+            )
+
+            print(f"\n✅ Processing completed!")
+            print(f"   Total:   {results['total']}")
+            print(f"   Success: {results['success']}")
+            print(f"   Failed:  {results['failed']}")
+
+            # Show statistics
+            print()
+            processor.print_statistics()
+
+        except Exception as e:
+            print(f"\n❌ Processing error: {e}")
+            import traceback
+
+            traceback.print_exc()
+            raise
+        finally:
+            if self.db:
+                self.db.close()
+
     def _process_single_product(self, pid: int):
         """Process a single product"""
         product = (
@@ -1310,6 +1400,8 @@ class UnifiedCLI:
                         self.run_ingredient_quality_processing()
                     elif self.args["longevity_additives"]:
                         self.run_longevity_additives_processing()
+                    elif self.args["nutritionally_adequate"]:
+                        self.run_nutritionally_adequate_processing()
                     else:
                         self.run_process()
 

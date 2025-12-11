@@ -59,6 +59,7 @@ class ProcessingMethodEnum(str, enum.Enum):
 class NutritionallyAdequateEnum(str, enum.Enum):
     YES = "Yes"
     NO = "No"
+    OTHER = "Other"
 
 
 class QualityClassEnum(str, enum.Enum):
