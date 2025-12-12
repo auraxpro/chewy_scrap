@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.v1 import frontend
 from app.api.v1.router import api_router
 from app.config import (
     API_DESCRIPTION,
@@ -66,6 +67,9 @@ app.add_middleware(
 
 # Include API routers
 app.include_router(api_router, prefix="/api/v1")
+
+# Include frontend API endpoints at root level
+app.include_router(frontend.router, tags=["Frontend"])
 
 
 @app.get("/", tags=["Root"])
