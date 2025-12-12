@@ -407,11 +407,12 @@ class ChewyScraperUCD:
         # --------------------------------------------
         hidden_div = None
         for child in trunc.find_all(recursive=False):
-            if child.name == "div" and child.get("style", "").startswith(
-                "display:none"
-            ):
-                hidden_div = child
-                break
+            if child.name == "div":
+                style_attr = child.get("style", "").lower().replace(" ", "")
+                # Check for both "display:none" and "display:none;" (with or without space)
+                if "display:none" in style_attr:
+                    hidden_div = child
+                    break
 
         if not hidden_div:
             return out
@@ -426,19 +427,43 @@ class ChewyScraperUCD:
         # ✨ Middle sections = DESCRIPTION paragraphs
 
         # --------------------------------------------
-        # 4️⃣ Extract SPECIFICATIONS (last section)
+        # 4️⃣ Extract SPECIFICATIONS (section with "Specifications" title)
         # --------------------------------------------
-        spec_section = sections[-1]
-        out["specifications"] = self.extract_all_content(spec_section)
+        spec_section = None
+        middle_sections = []
+        
+        for section in sections:
+            # Skip duplicate KEY_BENEFITS section (has id="KEY_BENEFITS-section")
+            section_id = section.get("id", "")
+            if section_id == "KEY_BENEFITS-section":
+                continue
+            
+            # Check if this section has a title div with "Specifications"
+            # The title is in a div with class containing "infoGroupSectionTitle"
+            # BeautifulSoup class_ can be a string or list, so we need to handle both
+            title_divs = section.find_all("div", class_=lambda x: x and ("infoGroupSectionTitle" in str(x) if x else False))
+            is_spec_section = False
+            for title_div in title_divs:
+                if title_div.get_text(strip=True) == "Specifications":
+                    spec_section = section
+                    is_spec_section = True
+                    break
+            
+            if not is_spec_section:
+                middle_sections.append(section)
+
+        if spec_section:
+            out["specifications"] = self.extract_all_content(spec_section)
 
         # --------------------------------------------
         # 5️⃣ Extract MORE_DETAILS (middle sections)
         # --------------------------------------------
-        middle_sections = sections[1:-1]  # exclude first (duplicate) & last (specs)
         if middle_sections:
             paras = []
             for sec in middle_sections:
-                paras.append(self.extract_all_content(sec))
+                p = self.extract_all_content(sec)
+                if p:
+                    paras.append(p)
             out["more_details"] = "\n\n".join(paras)
 
         return out
@@ -569,6 +594,7 @@ class ChewyScraperUCD:
         print(f"\n📦 Scraping product details: {product_url}")
 
         html = self.load_page(product_url)
+        time.sleep(random.uniform(2.5, 3.5))
         if not html:
             print(f"❌ ERROR: Failed to load product page: {product_url}")
             print(f"❌ ERROR: Page load failed - incomplete or blocked page")
@@ -679,16 +705,41 @@ class ChewyScraperUCD:
     # ----------------------------------------
     # ⭐ Scrape all unscraped products
     # ----------------------------------------
-    def scrape_all_product_details(self, limit: int = None, offset: int = None):
-        """Scrape details for all products that haven't been scraped yet"""
+    def scrape_all_product_details(self, limit: int = None, offset: int = None, include_skipped: bool = None):
+        """
+        Scrape details for all products that haven't been scraped yet.
+        
+        Args:
+            limit: Maximum number of products to scrape
+            offset: Number of products to skip before starting
+            include_skipped: If True, include skipped products. If False, exclude skipped products.
+                           If None (default), exclude skipped products (backward compatible).
+        """
         db = SessionLocal()
         try:
-            # Get all unscraped products (exclude skipped products)
-            query = (
-                db.query(ProductList)
-                .filter_by(scraped=False, skipped=False)
-                .order_by(ProductList.id)
-            )
+            # Get all unscraped products
+            # Default behavior: exclude skipped products (backward compatible)
+            if include_skipped is True:
+                # Include skipped products
+                query = (
+                    db.query(ProductList)
+                    .filter_by(scraped=False)
+                    .order_by(ProductList.id)
+                )
+            elif include_skipped is False:
+                # Explicitly exclude skipped products
+                query = (
+                    db.query(ProductList)
+                    .filter_by(scraped=False, skipped=False)
+                    .order_by(ProductList.id)
+                )
+            else:
+                # Default: exclude skipped products (backward compatible)
+                query = (
+                    db.query(ProductList)
+                    .filter_by(scraped=False, skipped=False)
+                    .order_by(ProductList.id)
+                )
             if offset is not None:
                 query = query.offset(offset)
             if limit:
@@ -743,6 +794,105 @@ class ChewyScraperUCD:
 
         except Exception as e:
             print(f"❌ Error in scrape_all_product_details: {e}")
+            import traceback
+
+            traceback.print_exc()
+        finally:
+            db.close()
+
+    # ----------------------------------------
+    # ⭐ Scrape products with null details
+    # ----------------------------------------
+    def scrape_products_with_null_details(self, limit: int = None, offset: int = None, include_skipped: bool = False):
+        """
+        Rescrape products that have null details (either never scraped or scraped but details missing).
+        
+        This finds products where:
+        - scraped=False (never scraped), OR
+        - scraped=True but no ProductDetails record exists (details are null)
+        
+        Args:
+            limit: Maximum number of products to scrape
+            offset: Number of products to skip before starting
+            include_skipped: If True, include skipped products. Default is False.
+        """
+        db = SessionLocal()
+        try:
+            from app.models.product import ProductDetails
+            
+            # Query for products with null details
+            # This includes:
+            # 1. Products that were never scraped (scraped=False)
+            # 2. Products that were scraped but have no ProductDetails record
+            if include_skipped:
+                query = (
+                    db.query(ProductList)
+                    .outerjoin(ProductDetails, ProductList.id == ProductDetails.product_id)
+                    .filter(
+                        (ProductList.scraped == False) | (ProductDetails.id.is_(None))
+                    )
+                    .order_by(ProductList.id)
+                )
+            else:
+                query = (
+                    db.query(ProductDetails)
+                    .filter((ProductDetails.specifications.is_(None))
+                    )
+                    .order_by(ProductDetails.id)
+                )
+            
+            if offset is not None:
+                query = query.offset(offset)
+            if limit:
+                query = query.limit(limit)
+            
+            products_to_scrape = query.all()
+
+            total = len(products_to_scrape)
+            print(f"\n📦 Found {total} product(s) with null details")
+
+            if total == 0:
+                print("✅ All products have details!")
+                return
+
+            # Count products by type
+            success_count = 0
+            fail_count = 0
+
+            for idx, product in enumerate(products_to_scrape, 1):
+                print(f"\n[{idx}/{total}] Processing: {product.product_url}")
+
+                try:
+                    details = self.scrape_product_details(
+                        product.product_url
+                    )
+
+                    if details:
+                        if self.save_product_details(product.product_id, details):
+                            success_count += 1
+                        else:
+                            fail_count += 1
+                    else:
+                        # If details is None, mark product as skipped and continue
+                        print(
+                            f"⚠️ No details extracted for product: {product.product_url} - marking as skipped"
+                        )
+                        self.mark_product_as_skipped(product.product_id)
+                        fail_count += 1
+                        # Continue to next product instead of stopping
+                except Exception as e:
+                    fail_count += 1
+                    print(f"❌ Error scraping product {product.id}: {e}")
+                    import traceback
+
+                    traceback.print_exc()
+
+            print(f"\n✅ Scraping completed!")
+            print(f"   Success: {success_count}")
+            print(f"   Failed: {fail_count}")
+
+        except Exception as e:
+            print(f"❌ Error in scrape_products_with_null_details: {e}")
             import traceback
 
             traceback.print_exc()

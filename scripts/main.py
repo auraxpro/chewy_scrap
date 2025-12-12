@@ -11,7 +11,9 @@ Usage:
 Commands:
     --scrape, -s           Scrape product URLs from Chewy.com
     --scrape --details     Scrape detailed product information
+    --scrape --details --null-details  Rescrape products with null details
     --process, -p          Process and normalize product data
+    --process-all          Process all records through all processors in order
     --category             Process food categories (use with --process)
     --sourcing             Process sourcing integrity (use with --process)
     --processing           Process processing methods (use with --process)
@@ -31,6 +33,7 @@ Options:
     --product-id, -pid N   Process/score single product by ID
     --test-url, -tu URL    Test scrape single product by URL
     --product-url, --product_url, -pu URL Scrape single product by URL (must exist in DB)
+    --skipped, --skiped true/false Include/exclude skipped products when scraping (default: exclude)
     --reprocess-category C Reprocess specific category (Raw/Fresh/Dry/Wet/Other)
     --reprocess-sourcing S Reprocess sourcing integrity (Human Grade (organic)/Human Grade/Feed Grade/Other)
     --reprocess-processing P Reprocess processing method (Freeze Dried/Extruded/Baked/etc.)
@@ -46,6 +49,13 @@ Examples:
 
     # Scrape with limit
     python scripts/main.py --scrape --details --limit 100
+
+    # Rescrape products with null details
+    python scripts/main.py --scrape --details --null-details
+    python scripts/main.py --scrape --details --null-details --limit 100
+
+    # Scrape including skipped products
+    python cli.py --scrape --details --skipped true
 
     # Test scrape first page only
     python scripts/main.py --scrape --test
@@ -99,6 +109,11 @@ Examples:
     # Process starchy carb extraction
     python scripts/main.py --process --starchy-carb
     python scripts/main.py --process --starchy-carb --limit 100
+
+    # Process all records through all processors in order
+    python scripts/main.py --process-all
+    python scripts/main.py --process-all --limit 100
+    python scripts/main.py --process-all --limit 50 --offset 100
 
     # Calculate scores for all unscored products
     python scripts/main.py --score
@@ -162,6 +177,7 @@ class UnifiedCLI:
             "starchy_carb": False,
             "score": False,
             "all": False,
+            "process_all": False,
             "stats": False,
             # Options
             "limit": None,
@@ -175,6 +191,8 @@ class UnifiedCLI:
             "reprocess_sourcing": None,
             "reprocess_processing": None,
             "reprocess_quality": None,
+            "skipped": None,  # None = default behavior, True = include skipped, False = exclude skipped
+            "null_details": False,  # Rescrape products with null details
             "help": False,
         }
 
@@ -212,6 +230,9 @@ class UnifiedCLI:
                 i += 1
             elif arg in ["--starchy-carb"]:
                 args["starchy_carb"] = True
+                i += 1
+            elif arg in ["--process-all", "--processall"]:
+                args["process_all"] = True
                 i += 1
             elif arg in ["--score", "-sc"]:
                 args["score"] = True
@@ -329,6 +350,22 @@ class UnifiedCLI:
                     print(f"❌ Invalid quality class: {quality}")
                     print(f"Valid qualities: {', '.join(valid_qualities)}")
                     sys.exit(1)
+
+            elif arg in ["--skipped", "--skiped"] and i + 1 < len(sys.argv):
+                skipped_value = sys.argv[i + 1].lower()
+                if skipped_value in ["true", "1", "yes"]:
+                    args["skipped"] = True
+                elif skipped_value in ["false", "0", "no"]:
+                    args["skipped"] = False
+                else:
+                    print(f"❌ Invalid skipped value: {sys.argv[i + 1]}")
+                    print("Valid values: true, false, 1, 0, yes, no")
+                    sys.exit(1)
+                i += 2
+
+            elif arg in ["--null-details", "--nulldetails", "--rescrape-null"]:
+                args["null_details"] = True
+                i += 1
 
             elif arg in ["--help", "-h"]:
                 args["help"] = True
@@ -486,15 +523,54 @@ class UnifiedCLI:
 
             elif self.args["details"]:
                 # Scrape product details
-                print("\n📦 Scraping product details...")
+                if self.args["null_details"]:
+                    # Rescrape products with null details
+                    print("\n📦 Rescraping products with null details...")
+                    
+                    # Determine whether to include skipped products
+                    include_skipped = False  # Default: exclude skipped
+                    if self.args["skipped"] is not None:
+                        include_skipped = self.args["skipped"]
+                        if include_skipped:
+                            print("⚠️  Including skipped products in rescraping")
+                        else:
+                            print("ℹ️  Excluding skipped products from rescraping")
 
-                if self.args["test"]:
-                    print("🧪 Test mode: Scraping first 5 unscraped products")
-                    self.scraper.scrape_all_product_details(limit=5)
+                    if self.args["test"]:
+                        print("🧪 Test mode: Rescraping first 5 products with null details")
+                        self.scraper.scrape_products_with_null_details(
+                            limit=5, offset=self.args["offset"], include_skipped=include_skipped
+                        )
+                    else:
+                        self.scraper.scrape_products_with_null_details(
+                            limit=self.args["limit"], 
+                            offset=self.args["offset"],
+                            include_skipped=include_skipped
+                        )
                 else:
-                    self.scraper.scrape_all_product_details(
-                        limit=self.args["limit"], offset=self.args["offset"]
-                    )
+                    # Normal scraping of unscraped products
+                    print("\n📦 Scraping product details...")
+                    
+                    # Determine whether to include skipped products
+                    include_skipped = None  # Default behavior (exclude skipped)
+                    if self.args["skipped"] is not None:
+                        include_skipped = self.args["skipped"]
+                        if include_skipped:
+                            print("⚠️  Including skipped products in scraping")
+                        else:
+                            print("ℹ️  Excluding skipped products from scraping")
+
+                    if self.args["test"]:
+                        print("🧪 Test mode: Scraping first 5 unscraped products")
+                        self.scraper.scrape_all_product_details(
+                            limit=5, offset=self.args["offset"], include_skipped=include_skipped
+                        )
+                    else:
+                        self.scraper.scrape_all_product_details(
+                            limit=self.args["limit"], 
+                            offset=self.args["offset"],
+                            include_skipped=include_skipped
+                        )
 
             else:
                 # Scrape product list
@@ -1256,6 +1332,196 @@ class UnifiedCLI:
         print("\n⚠️  Note: Specific processors not yet fully implemented")
         print("\n✅ Product has details (considered processed)")
 
+    def run_process_all(self):
+        """Run all processors in order for all records with smart progress bar"""
+        import sys
+        import time as time_module
+        
+        from app.processors.food_category_processor import FoodCategoryProcessor
+        from app.processors.sourcing_integrity_processor import SourcingIntegrityProcessor
+        from app.processors.processing_method_processor import ProcessingMethodProcessor
+        from app.processors.nutritionally_adequate_processor import NutritionallyAdequateProcessor
+        from app.processors.starchy_carb_processor import StarchyCarbProcessor
+        from app.processors.ingredient_quality_processor import IngredientQualityProcessor
+        from app.processors.longevity_additives_processor import LongevityAdditivesProcessor
+        from app.models.product import ProductDetails
+
+        print("\n" + "=" * 70)
+        print("🔄 PROCESS ALL - Running All Processors in Order")
+        print("=" * 70)
+
+        self.db = SessionLocal()
+        try:
+            # Get all product details
+            query = self.db.query(ProductDetails)
+            
+            if self.args["limit"]:
+                query = query.limit(self.args["limit"])
+            
+            if self.args["offset"]:
+                query = query.offset(self.args["offset"])
+            
+            product_details = query.order_by(ProductDetails.id).all()
+            total = len(product_details)
+
+            if total == 0:
+                print("\n✅ No products to process!")
+                return
+
+            print(f"\n📊 Found {total} product(s) to process")
+            print("\nProcessing order:")
+            print("  1. Category Classifier")
+            print("  2. Sourcing Integrity")
+            print("  3. Processing Method")
+            print("  4. Nutritionally Adequate")
+            print("  5. Starchy Carb")
+            print("  6. Ingredient Quality (includes Synthetic Nutrition)")
+            print("  7. Longevity Additives")
+            print()
+
+            # Initialize processors
+            processors = [
+                ("Category", FoodCategoryProcessor(self.db, "v1.0.0")),
+                ("Sourcing", SourcingIntegrityProcessor(self.db, "v1.0.0")),
+                ("Processing", ProcessingMethodProcessor(self.db, "v1.0.0")),
+                ("Nutrition", NutritionallyAdequateProcessor(self.db, "v1.0.0")),
+                ("Starchy Carb", StarchyCarbProcessor(self.db, "v1.0.0")),
+                ("Ingredient", IngredientQualityProcessor(self.db, "v1.0.0")),
+                ("Longevity", LongevityAdditivesProcessor(self.db, "v1.0.0")),
+            ]
+
+            # Statistics
+            stats = {
+                "total": total,
+                "success": 0,
+                "failed": 0,
+                "processor_stats": {name: {"success": 0, "failed": 0} for name, _ in processors}
+            }
+
+            start_time = datetime.now()
+            last_update_time = start_time
+
+            # Process each record through all processors
+            for idx, detail in enumerate(product_details, 1):
+                product_name = detail.product_name[:40] if detail.product_name else f"ID {detail.id}"
+                record_success = True
+                
+                # Process through each processor in order
+                for step_num, (processor_name, processor) in enumerate(processors, 1):
+                    # Calculate progress
+                    overall_progress = (idx - 1) / total * 100
+                    step_progress = (step_num - 1) / len(processors) * 100
+                    current_progress = overall_progress + (step_progress / total)
+                    
+                    # Calculate elapsed time and ETA
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    if idx > 1:
+                        avg_time_per_record = elapsed / (idx - 1)
+                        remaining_records = total - idx + 1
+                        eta_seconds = avg_time_per_record * remaining_records
+                        eta_str = f"{int(eta_seconds // 60)}m {int(eta_seconds % 60)}s"
+                    else:
+                        eta_str = "calculating..."
+                    
+                    # Create progress bar
+                    bar_width = 40
+                    filled = int(bar_width * current_progress / 100)
+                    bar = "█" * filled + "░" * (bar_width - filled)
+                    
+                    # Update progress line (overwrite same line)
+                    progress_line = (
+                        f"\r[{idx:4d}/{total}] [{step_num}/7] {processor_name:12s} "
+                        f"|{bar}| {current_progress:5.1f}% "
+                        f"⏱ {int(elapsed // 60)}m {int(elapsed % 60)}s "
+                        f"ETA: {eta_str:8s} | {product_name}"
+                    )
+                    sys.stdout.write(progress_line)
+                    sys.stdout.flush()
+                    
+                    try:
+                        processor.process_single(detail.id)
+                        stats["processor_stats"][processor_name]["success"] += 1
+                    except Exception as e:
+                        # Print error on new line, then continue
+                        error_msg = str(e)[:50]
+                        sys.stdout.write(f"\n  ❌ [{step_num}/7] {processor_name}: {error_msg}\n")
+                        sys.stdout.flush()
+                        stats["processor_stats"][processor_name]["failed"] += 1
+                        record_success = False
+                        if not self.args.get("force", False):
+                            continue
+
+                # Final update for this record
+                overall_progress = idx / total * 100
+                bar_width = 40
+                filled = int(bar_width * overall_progress / 100)
+                bar = "█" * filled + "░" * (bar_width - filled)
+                
+                elapsed = (datetime.now() - start_time).total_seconds()
+                if idx < total:
+                    avg_time_per_record = elapsed / idx
+                    remaining_records = total - idx
+                    eta_seconds = avg_time_per_record * remaining_records
+                    eta_str = f"{int(eta_seconds // 60)}m {int(eta_seconds % 60)}s"
+                else:
+                    eta_str = "done"
+                
+                status_icon = "✅" if record_success else "⚠️"
+                final_line = (
+                    f"\r[{idx:4d}/{total}] [7/7] Complete        "
+                    f"|{bar}| {overall_progress:5.1f}% "
+                    f"⏱ {int(elapsed // 60)}m {int(elapsed % 60)}s "
+                    f"ETA: {eta_str:8s} | {product_name} {status_icon}"
+                )
+                sys.stdout.write(final_line + "\n")
+                sys.stdout.flush()
+
+                if record_success:
+                    stats["success"] += 1
+                else:
+                    stats["failed"] += 1
+
+            # Clear the progress line and print final summary
+            sys.stdout.write("\r" + " " * 120 + "\r")  # Clear line
+            sys.stdout.flush()
+            
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
+
+            # Print summary
+            print("\n" + "=" * 70)
+            print("📊 PROCESSING SUMMARY")
+            print("=" * 70)
+            print(f"\nOverall:")
+            print(f"  Total Records:     {stats['total']:6,}")
+            print(f"  Successful:        {stats['success']:6,}")
+            print(f"  Failed:            {stats['failed']:6,}")
+            print(f"  Duration:          {duration:.2f}s ({duration/60:.1f}m)")
+            
+            if stats['success'] > 0:
+                avg_time = duration / stats['success']
+                print(f"  Avg per record:     {avg_time:.2f}s")
+
+            print(f"\nBy Processor:")
+            for processor_name, proc_stats in stats["processor_stats"].items():
+                success = proc_stats["success"]
+                failed = proc_stats["failed"]
+                total_proc = success + failed
+                if total_proc > 0:
+                    pct = (success / total_proc) * 100
+                    print(f"  {processor_name:12s}: {success:6,} ✅ / {failed:6,} ❌ ({pct:5.1f}%)")
+
+            print("=" * 70)
+
+        except Exception as e:
+            print(f"\n❌ Processing error: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+        finally:
+            if self.db:
+                self.db.close()
+
     def run_score(self):
         """Run scoring operation"""
         print("\n" + "=" * 70)
@@ -1475,6 +1741,8 @@ class UnifiedCLI:
         try:
             if self.args["all"]:
                 self.run_all()
+            elif self.args["process_all"]:
+                self.run_process_all()
             else:
                 if self.args["scrape"]:
                     self.run_scrape()
