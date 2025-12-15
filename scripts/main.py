@@ -21,8 +21,9 @@ Commands:
     --longevity-additives   Process longevity additives (use with --process)
     --nutritionally-adequate Process nutritionally adequate status (use with --process)
     --starchy-carb         Process starchy carb extraction (use with --process)
-    --score, -sc           Calculate quality scores for products
-    --all, -a              Run complete pipeline (scrape → process → score)
+    --base-score           Calculate base scores (use with --process)
+    --brand                Process brand detection (use with --process)
+    --all, -a              Run complete pipeline (scrape → process → base-score)
     --stats                Show statistics for all stages
 
 Options:
@@ -110,13 +111,23 @@ Examples:
     python scripts/main.py --process --starchy-carb
     python scripts/main.py --process --starchy-carb --limit 100
 
+    # Calculate base scores
+    python scripts/main.py --process --base-score
+    python scripts/main.py --process --base-score --limit 100
+    python scripts/main.py --process --base-score --product-id 123
+
+    # Process brand detection
+    python scripts/main.py --process --brand
+    python scripts/main.py --process --brand --limit 100
+    python scripts/main.py --process --brand --product-id 123
+
     # Process all records through all processors in order
     python scripts/main.py --process-all
     python scripts/main.py --process-all --limit 100
     python scripts/main.py --process-all --limit 50 --offset 100
 
-    # Calculate scores for all unscored products
-    python scripts/main.py --score
+    # Calculate base scores for all products
+    python scripts/main.py --process --base-score
 
     # Run complete pipeline
     python scripts/main.py --all
@@ -127,8 +138,8 @@ Examples:
     # Show statistics
     python scripts/main.py --stats
 
-    # Force recalculate all scores (limited)
-    python scripts/main.py --score --force --limit 50
+    # Force recalculate all base scores (limited)
+    python scripts/main.py --process --base-score --force --limit 50
 """
 
 import os
@@ -136,6 +147,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+from sqlalchemy import func
 
 # Add parent directory to path so we can import app module
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -175,7 +188,9 @@ class UnifiedCLI:
             "longevity_additives": False,
             "nutritionally_adequate": False,
             "starchy_carb": False,
-            "score": False,
+            "base_score": False,
+            "brand": False,
+            # "score": False,  # Removed - use base_score instead
             "all": False,
             "process_all": False,
             "stats": False,
@@ -231,12 +246,19 @@ class UnifiedCLI:
             elif arg in ["--starchy-carb"]:
                 args["starchy_carb"] = True
                 i += 1
+            elif arg in ["--base-score"]:
+                args["base_score"] = True
+                i += 1
+            elif arg in ["--brand"]:
+                args["brand"] = True
+                i += 1
             elif arg in ["--process-all", "--processall"]:
                 args["process_all"] = True
                 i += 1
-            elif arg in ["--score", "-sc"]:
-                args["score"] = True
-                i += 1
+            # --score command removed - use --process --base-score instead
+            # elif arg in ["--score", "-sc"]:
+            #     args["score"] = True
+            #     i += 1
             elif arg in ["--all", "-a"]:
                 args["all"] = True
                 i += 1
@@ -970,6 +992,86 @@ class UnifiedCLI:
             if self.db:
                 self.db.close()
 
+    def run_brand_processing(self):
+        """Run brand detection"""
+        from app.processors.brand_processor import BrandProcessor
+
+        print("\n" + "=" * 70)
+        print("🔧 BRAND DETECTION PROCESSING")
+        print("=" * 70)
+
+        self.db = SessionLocal()
+        try:
+            processor = BrandProcessor(self.db, processor_version="v1.0.0")
+
+            # Handle single product
+            if self.args["product_id"]:
+                from app.models.product import ProductDetails
+
+                pid = self.args["product_id"]
+                print(f"\nProcessing single product (ID={pid})")
+                # Try treating as ProductDetails.id first
+                detail = (
+                    self.db.query(ProductDetails)
+                    .filter(ProductDetails.id == pid)
+                    .first()
+                )
+                if not detail:
+                    # Fallback: treat as ProductList.id (ProductDetails.product_id)
+                    detail = (
+                        self.db.query(ProductDetails)
+                        .filter(ProductDetails.product_id == pid)
+                        .first()
+                    )
+                if not detail:
+                    print(f"\n❌ Could not find ProductDetails for ID={pid}")
+                    print(
+                        "   Provide a ProductDetails.id or a ProductList.id that has details."
+                    )
+                    return
+                try:
+                    result = processor.process_single(detail.id)
+                    print(f"\n✅ Success!")
+                    print(f"  Product Detail ID:     {result.product_detail_id}")
+                    print(f"  Brand:                 {result.brand}")
+                    print(f"  Detection Method:      {result.brand_detection_method}")
+                    print(f"  Confidence:           {result.brand_detection_confidence}")
+                    if result.brand_detection_reason:
+                        print(f"  Reason:                {result.brand_detection_reason}")
+                    print(f"  Processed At:          {result.processed_at}")
+                except Exception as e:
+                    print(f"\n❌ Error: {e}")
+                return
+
+            # Handle batch processing
+            print(f"\nProcessing all products")
+            if self.args["limit"]:
+                print(f"Limit: {self.args['limit']}")
+            print(f"Mode: {'Reprocess all' if self.args['force'] else 'Skip existing'}")
+
+            results = processor.process_all(
+                limit=self.args["limit"], skip_existing=not self.args["force"]
+            )
+
+            print(f"\n✅ Processing completed!")
+            print(f"   Total:   {results.get('total', 0)}")
+            print(f"   Success: {results.get('success', 0)}")
+            print(f"   Failed:  {results.get('failed', 0)}")
+
+            # Show statistics
+            print()
+            processor.print_statistics()
+
+        except Exception as e:
+            print(f"\n❌ Processing error: {e}")
+            import traceback
+
+            traceback.print_exc()
+            raise
+        finally:
+            if self.db:
+                self.db.close()
+
     def run_ingredient_quality_processing(self):
         """Run ingredient quality classification"""
         from app.processors.ingredient_quality_processor import (
@@ -1313,6 +1415,160 @@ class UnifiedCLI:
             if self.db:
                 self.db.close()
 
+    def run_base_score_processing(self):
+        """Run base score calculation"""
+        from app.scoring.base_score_calculator import BaseScoreCalculator
+        from app.models.product import ProcessedProduct, ProductDetails
+
+        print("\n" + "=" * 70)
+        print("📊 BASE SCORE CALCULATION")
+        print("=" * 70)
+
+        self.db = SessionLocal()
+        try:
+            calculator = BaseScoreCalculator(self.db)
+
+            # Handle single product
+            if self.args["product_id"]:
+                pid = self.args["product_id"]
+                print(f"\nCalculating base score for product (ID={pid})")
+                # Try treating as ProductDetails.product_id first
+                detail = (
+                    self.db.query(ProductDetails)
+                    .filter(ProductDetails.product_id == pid)
+                    .first()
+                )
+                if not detail:
+                    # Fallback: treat as ProductList.id (ProductDetails.product_id)
+                    detail = (
+                        self.db.query(ProductDetails)
+                        .filter(ProductDetails.product_id == pid)
+                        .first()
+                    )
+                if not detail:
+                    print(f"\n❌ Could not find ProductDetails for ID={pid}")
+                    print(
+                        "   Provide a ProductDetails.id or a ProductList.id that has details."
+                    )
+                    return
+                
+                # Get processed product
+                processed = (
+                    self.db.query(ProcessedProduct)
+                    .filter(ProcessedProduct.product_detail_id == detail.id)
+                    .first()
+                )
+                
+                if not processed:
+                    print(f"\n❌ Could not find ProcessedProduct for ProductDetails ID={detail.id}")
+                    print("   Please run --process-all or individual processors first.")
+                    return
+                
+                try:
+                    base_score = calculator.calculate_and_save_base_score(processed)
+                    if base_score is not None:
+                        print(f"\n✅ Success!")
+                        print(f"  Product Detail ID:     {processed.product_detail_id}")
+                        print(f"  Base Score:            {base_score:.2f}")
+                        print(f"  Food Category:         {processed.food_category}")
+                        print(f"  Sourcing Integrity:    {processed.sourcing_integrity}")
+                        print(f"  Processing Method:     {processed.processing_adulteration_method}")
+                    else:
+                        print(f"\n⚠️  Base score calculation skipped")
+                        print(f"  Product Detail ID:     {processed.product_detail_id}")
+                        print(f"  Reason:                Missing required data (sent to QA)")
+                except Exception as e:
+                    print(f"\n❌ Error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                return
+
+            # Handle batch processing
+            print(f"\nCalculating base scores for all processed products")
+            if self.args["limit"]:
+                print(f"Limit: {self.args['limit']}")
+            if self.args["offset"]:
+                print(f"Offset: {self.args['offset']}")
+            print(f"Mode: {'Recalculate all' if self.args['force'] else 'Skip existing'}")
+
+            # Get all processed products
+            query = self.db.query(ProcessedProduct).join(ProductDetails)
+            
+            if not self.args["force"]:
+                # Skip products that already have base_score
+                query = query.filter(ProcessedProduct.base_score == None)
+            
+            if self.args["offset"]:
+                query = query.offset(self.args["offset"])
+            
+            if self.args["limit"]:
+                query = query.limit(self.args["limit"])
+            
+            processed_products = query.order_by(ProcessedProduct.id).all()
+            total = len(processed_products)
+
+            if total == 0:
+                print("\n✅ No products to process!")
+                return
+
+            print(f"\n📊 Found {total} product(s) to process")
+
+            # Statistics
+            stats = {
+                "total": total,
+                "success": 0,
+                "failed": 0,
+                "missing_data": 0,
+            }
+
+            # Process each product
+            for idx, processed in enumerate(processed_products, 1):
+                product_name = (
+                    processed.product_detail.product_name[:40]
+                    if processed.product_detail and processed.product_detail.product_name
+                    else f"ID {processed.id}"
+                )
+                
+                print(f"\r[{idx:4d}/{total}] Processing: {product_name[:50]}", end="", flush=True)
+                
+                try:
+                    base_score = calculator.calculate_and_save_base_score(processed)
+                    if base_score is not None:
+                        stats["success"] += 1
+                    else:
+                        stats["missing_data"] += 1
+                except Exception as e:
+                    stats["failed"] += 1
+                    print(f"\n  ❌ Error for product {processed.id}: {str(e)[:50]}")
+
+            print("\n")  # New line after progress
+
+            print(f"\n✅ Base score calculation completed!")
+            print(f"   Total:        {stats['total']:6,}")
+            print(f"   Calculated:   {stats['success']:6,} ✅")
+            print(f"   Missing Data: {stats['missing_data']:6,} ⚠️  (sent to QA)")
+            print(f"   Failed:       {stats['failed']:6,} ❌")
+
+            # Show statistics
+            if stats['success'] > 0:
+                # Calculate average base score
+                avg_score = (
+                    self.db.query(func.avg(ProcessedProduct.base_score))
+                    .filter(ProcessedProduct.base_score != None)
+                    .scalar()
+                )
+                if avg_score:
+                    print(f"\n   Average Base Score: {float(avg_score):.2f}")
+
+        except Exception as e:
+            print(f"\n❌ Processing error: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+        finally:
+            if self.db:
+                self.db.close()
+
     def _process_single_product(self, pid: int):
         """Process a single product"""
         product = (
@@ -1338,6 +1594,7 @@ class UnifiedCLI:
         import time as time_module
         
         from app.processors.food_category_processor import FoodCategoryProcessor
+        from app.processors.brand_processor import BrandProcessor
         from app.processors.sourcing_integrity_processor import SourcingIntegrityProcessor
         from app.processors.processing_method_processor import ProcessingMethodProcessor
         from app.processors.nutritionally_adequate_processor import NutritionallyAdequateProcessor
@@ -1371,17 +1628,20 @@ class UnifiedCLI:
             print(f"\n📊 Found {total} product(s) to process")
             print("\nProcessing order:")
             print("  1. Category Classifier")
-            print("  2. Sourcing Integrity")
-            print("  3. Processing Method")
-            print("  4. Nutritionally Adequate")
-            print("  5. Starchy Carb")
-            print("  6. Ingredient Quality (includes Synthetic Nutrition)")
-            print("  7. Longevity Additives")
+            print("  2. Brand Detection")
+            print("  3. Sourcing Integrity")
+            print("  4. Processing Method")
+            print("  5. Nutritionally Adequate")
+            print("  6. Starchy Carb")
+            print("  7. Ingredient Quality (includes Synthetic Nutrition)")
+            print("  8. Longevity Additives")
+            print("  9. Base Score Calculation")
             print()
 
             # Initialize processors
             processors = [
                 ("Category", FoodCategoryProcessor(self.db, "v1.0.0")),
+                ("Brand", BrandProcessor(self.db, "v1.0.0")),
                 ("Sourcing", SourcingIntegrityProcessor(self.db, "v1.0.0")),
                 ("Processing", ProcessingMethodProcessor(self.db, "v1.0.0")),
                 ("Nutrition", NutritionallyAdequateProcessor(self.db, "v1.0.0")),
@@ -1389,13 +1649,18 @@ class UnifiedCLI:
                 ("Ingredient", IngredientQualityProcessor(self.db, "v1.0.0")),
                 ("Longevity", LongevityAdditivesProcessor(self.db, "v1.0.0")),
             ]
+            
+            # Initialize base score calculator
+            from app.scoring.base_score_calculator import BaseScoreCalculator
+            base_score_calculator = BaseScoreCalculator(self.db)
 
             # Statistics
             stats = {
                 "total": total,
                 "success": 0,
                 "failed": 0,
-                "processor_stats": {name: {"success": 0, "failed": 0} for name, _ in processors}
+                "processor_stats": {name: {"success": 0, "failed": 0} for name, _ in processors},
+                "base_score_stats": {"success": 0, "failed": 0, "missing_data": 0}
             }
 
             start_time = datetime.now()
@@ -1410,7 +1675,7 @@ class UnifiedCLI:
                 for step_num, (processor_name, processor) in enumerate(processors, 1):
                     # Calculate progress
                     overall_progress = (idx - 1) / total * 100
-                    step_progress = (step_num - 1) / len(processors) * 100
+                    step_progress = (step_num - 1) / (len(processors) + 1) * 100  # +1 for base score step
                     current_progress = overall_progress + (step_progress / total)
                     
                     # Calculate elapsed time and ETA
@@ -1430,13 +1695,12 @@ class UnifiedCLI:
                     
                     # Update progress line (overwrite same line)
                     progress_line = (
-                        f"\r[{idx:4d}/{total}] [{step_num}/7] {processor_name:12s} "
+                        f"\r[{idx:4d}/{total}] [{step_num}/8] {processor_name:12s} "
                         f"|{bar}| {current_progress:5.1f}% "
                         f"⏱ {int(elapsed // 60)}m {int(elapsed % 60)}s "
                         f"ETA: {eta_str:8s} | {product_name}"
                     )
                     sys.stdout.write(progress_line)
-                    sys.stdout.flush()
                     
                     try:
                         processor.process_single(detail.id)
@@ -1444,12 +1708,61 @@ class UnifiedCLI:
                     except Exception as e:
                         # Print error on new line, then continue
                         error_msg = str(e)[:50]
-                        sys.stdout.write(f"\n  ❌ [{step_num}/7] {processor_name}: {error_msg}\n")
-                        sys.stdout.flush()
+                        sys.stdout.write(f"\n  ❌ [{step_num}/8] {processor_name}: {error_msg}\n")
                         stats["processor_stats"][processor_name]["failed"] += 1
                         record_success = False
                         if not self.args.get("force", False):
                             continue
+                
+                # Step 8: Calculate Base Score
+                step_num = 8
+                overall_progress = (idx - 1) / total * 100
+                step_progress = 7 / (len(processors) + 1) * 100
+                current_progress = overall_progress + (step_progress / total)
+                
+                elapsed = (datetime.now() - start_time).total_seconds()
+                if idx > 1:
+                    avg_time_per_record = elapsed / (idx - 1)
+                    remaining_records = total - idx + 1
+                    eta_seconds = avg_time_per_record * remaining_records
+                    eta_str = f"{int(eta_seconds // 60)}m {int(eta_seconds % 60)}s"
+                else:
+                    eta_str = "calculating..."
+                
+                bar_width = 40
+                filled = int(bar_width * current_progress / 100)
+                bar = "█" * filled + "░" * (bar_width - filled)
+                
+                progress_line = (
+                    f"\r[{idx:4d}/{total}] [8/8] Base Score     "
+                    f"|{bar}| {current_progress:5.1f}% "
+                    f"⏱ {int(elapsed // 60)}m {int(elapsed % 60)}s "
+                    f"ETA: {eta_str:8s} | {product_name}"
+                )
+                sys.stdout.write(progress_line)
+                
+                try:
+                    # Get processed product record
+                    from app.models.product import ProcessedProduct
+                    processed = (
+                        self.db.query(ProcessedProduct)
+                        .filter(ProcessedProduct.product_detail_id == detail.id)
+                        .first()
+                    )
+                    
+                    if processed:
+                        base_score = base_score_calculator.calculate_and_save_base_score(processed)
+                        if base_score is not None:
+                            stats["base_score_stats"]["success"] += 1
+                        else:
+                            stats["base_score_stats"]["missing_data"] += 1
+                    else:
+                        stats["base_score_stats"]["failed"] += 1
+                except Exception as e:
+                    error_msg = str(e)[:50]
+                    sys.stdout.write(f"\n  ❌ [8/8] Base Score: {error_msg}\n")
+                    stats["base_score_stats"]["failed"] += 1
+                    record_success = False
 
                 # Final update for this record
                 overall_progress = idx / total * 100
@@ -1468,7 +1781,7 @@ class UnifiedCLI:
                 
                 status_icon = "✅" if record_success else "⚠️"
                 final_line = (
-                    f"\r[{idx:4d}/{total}] [7/7] Complete        "
+                    f"\r[{idx:4d}/{total}] [8/8] Complete        "
                     f"|{bar}| {overall_progress:5.1f}% "
                     f"⏱ {int(elapsed // 60)}m {int(elapsed % 60)}s "
                     f"ETA: {eta_str:8s} | {product_name} {status_icon}"
@@ -1510,137 +1823,21 @@ class UnifiedCLI:
                 if total_proc > 0:
                     pct = (success / total_proc) * 100
                     print(f"  {processor_name:12s}: {success:6,} ✅ / {failed:6,} ❌ ({pct:5.1f}%)")
+            
+            # Base Score Statistics
+            base_stats = stats["base_score_stats"]
+            total_base = base_stats["success"] + base_stats["failed"] + base_stats["missing_data"]
+            if total_base > 0:
+                print(f"\nBase Score Calculation:")
+                print(f"  Calculated:      {base_stats['success']:6,} ✅")
+                print(f"  Missing Data:    {base_stats['missing_data']:6,} ⚠️  (sent to QA)")
+                print(f"  Failed:          {base_stats['failed']:6,} ❌")
 
             print("=" * 70)
 
         except Exception as e:
             print(f"\n❌ Processing error: {e}")
             import traceback
-            traceback.print_exc()
-            raise
-        finally:
-            if self.db:
-                self.db.close()
-
-    def run_score(self):
-        """Run scoring operation"""
-        print("\n" + "=" * 70)
-        print("📊 SCORING")
-        print("=" * 70)
-
-        # Show configuration
-        print(f"\n⚖️  Scoring Configuration:")
-        print(f"   Version: {SCORING_VERSION}")
-        print(f"   Ingredient Quality: {SCORE_WEIGHT_INGREDIENTS * 100:.0f}%")
-        print(f"   Nutritional Value: {SCORE_WEIGHT_NUTRITION * 100:.0f}%")
-        print(f"   Processing Method: {SCORE_WEIGHT_PROCESSING * 100:.0f}%")
-        print(f"   Price-Value Ratio: {SCORE_WEIGHT_PRICE_VALUE * 100:.0f}%")
-
-        self.db = SessionLocal()
-        try:
-            scoring_service = ScoringService(self.db)
-
-            # Handle single product
-            if self.args["product_id"]:
-                self._score_single_product(scoring_service, self.args["product_id"])
-                return
-
-            # Handle batch scoring
-            from app.models.product import ProductDetails
-
-            try:
-                from app.models.score import ProductScore
-
-                if not self.args["force"]:
-                    # Get products with details but no scores
-                    query = (
-                        self.db.query(ProductList)
-                        .join(ProductDetails)
-                        .outerjoin(ProductScore)
-                        .filter(
-                            ProductList.scraped == True,
-                            ProductList.skipped == False,
-                            ProductScore.id == None,
-                        )
-                        .order_by(ProductList.id)
-                        .offset(self.args["offset"])
-                    )
-                else:
-                    # Force mode: get all products with details
-                    query = (
-                        self.db.query(ProductList)
-                        .join(ProductDetails)
-                        .filter(
-                            ProductList.scraped == True,
-                            ProductList.skipped == False,
-                        )
-                        .order_by(ProductList.id)
-                        .offset(self.args["offset"])
-                    )
-            except:
-                # If score tables don't exist, get all products with details
-                query = (
-                    self.db.query(ProductList)
-                    .join(ProductDetails)
-                    .filter(
-                        ProductList.scraped == True,
-                        ProductList.skipped == False,
-                    )
-                    .order_by(ProductList.id)
-                    .offset(self.args["offset"])
-                )
-
-            if self.args["limit"]:
-                query = query.limit(self.args["limit"])
-
-            products = query.all()
-            total = len(products)
-
-            if total == 0:
-                print("\n✅ No products to score!")
-                return
-
-            print(f"\n📊 Found {total} product(s) to score")
-            print("\n⚠️  Note: Using placeholder scoring logic")
-            print("⚠️  Implement specific scorers for real scores")
-
-            success = 0
-            failed = 0
-            total_score = 0.0
-
-            for idx, product in enumerate(products, 1):
-                print(f"\n[{idx}/{total}] Scoring product {product.id}")
-                if product.details:
-                    print(f"  📦 {product.details.product_name[:60]}...")
-
-                    try:
-                        score = scoring_service.calculate_product_score(
-                            product.id, force_recalculate=self.args["force"]
-                        )
-                        if score:
-                            success += 1
-                            total_score += score.total_score
-                            print(f"  ✅ Score: {score.total_score:.2f}/100")
-                        else:
-                            failed += 1
-                            print("  ❌ Failed to calculate score")
-                    except Exception as e:
-                        failed += 1
-                        print(f"  ❌ Error: {str(e)}")
-                else:
-                    failed += 1
-                    print("  ⚠️  No details found, skipping")
-
-            print(f"\n✅ Scoring completed!")
-            print(f"   Success: {success}")
-            print(f"   Failed: {failed}")
-            if success > 0:
-                print(f"   Average Score: {total_score / success:.2f}/100")
-
-        except Exception as e:
-            print(f"\n❌ Scoring error: {e}")
-            import traceback
-
             traceback.print_exc()
             raise
         finally:
@@ -1690,7 +1887,7 @@ class UnifiedCLI:
         print("\n" + "=" * 70)
         print("🚀 RUNNING COMPLETE PIPELINE")
         print("=" * 70)
-        print("\nThis will run: Scrape → Process → Score")
+        print("\nThis will run: Scrape → Process → Base Score")
         print()
 
         start_time = datetime.now()
@@ -1708,8 +1905,9 @@ class UnifiedCLI:
         # Step 2: Process
         self.run_process()
 
-        # Step 3: Score
-        self.run_score()
+        # Step 3: Calculate Base Scores
+        self.args["base_score"] = True
+        self.run_base_score_processing()
 
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
@@ -1762,11 +1960,16 @@ class UnifiedCLI:
                         self.run_nutritionally_adequate_processing()
                     elif self.args["starchy_carb"]:
                         self.run_starchy_carb_processing()
+                    elif self.args["base_score"]:
+                        self.run_base_score_processing()
+                    elif self.args["brand"]:
+                        self.run_brand_processing()
                     else:
                         self.run_process()
 
-                if self.args["score"]:
-                    self.run_score()
+                # --score command removed - use --process --base-score instead
+                # if self.args["score"]:
+                #     self.run_score()
 
             # Show final statistics
             print("\n" + "=" * 70)
@@ -1778,8 +1981,8 @@ class UnifiedCLI:
                 print("   • Run scraping: python scripts/main.py --scrape --details")
             if not self.args["process"] and not self.args["all"]:
                 print("   • Process data: python scripts/main.py --process")
-            if not self.args["score"] and not self.args["all"]:
-                print("   • Calculate scores: python scripts/main.py --score")
+            if not self.args["base_score"] and not self.args["all"]:
+                print("   • Calculate base scores: python scripts/main.py --process --base-score")
             print("   • Start API: uvicorn app.main:app --reload")
             print("   • View stats: python scripts/main.py --stats")
 

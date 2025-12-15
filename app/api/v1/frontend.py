@@ -10,9 +10,11 @@ This module provides REST API endpoints specifically designed for frontend consu
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_database
+from app.models.product import FoodStorageEnum, PackagingSizeEnum, ShelfLifeEnum
 from app.schemas.products_view import ProductListItemResponse, ProductViewResponse
 from app.schemas.score_calculation import (
     ScoreCalculationRequest,
@@ -21,6 +23,19 @@ from app.schemas.score_calculation import (
 from app.services.products_view_service import ProductsViewService
 
 router = APIRouter()
+
+
+# Enum response schemas
+class EnumValueResponse(BaseModel):
+    """Schema for enum value response."""
+    value: str = Field(..., description="Enum value")
+    label: str = Field(..., description="Human-readable label")
+
+
+class EnumListResponse(BaseModel):
+    """Schema for enum list response."""
+    enum_name: str = Field(..., description="Name of the enum")
+    values: List[EnumValueResponse] = Field(..., description="List of enum values")
 
 
 def get_products_view_service(db: Session = Depends(get_database)) -> ProductsViewService:
@@ -46,14 +61,26 @@ async def get_products(
     products = products_view_service.get_all_products()
     result = []
     for product in products:
-        # Extract id and name from the product dictionary
+        # Extract id, name, brand, category, and image URL from the product dictionary
         product_id = product.get("Product ID") or product.get("product_id")
         product_name = product.get("Product Name") or product.get("product_name") or ""
+        brand = product.get("Brand") or product.get("brand") or ""
+        category = product.get("Food Category") or product.get("food_category")
+        # Prefer ProductDetails.img_link, fallback to ProductList.product_image_url
+        product_img_url = (
+            product.get("Product Image") 
+            or product.get("product_image")
+            or product.get("Product Image URL")
+            or product.get("product_image_url")
+        )
         
         if product_id is not None:
             result.append(ProductListItemResponse(
                 id=product_id,
-                name=product_name
+                name=product_name,
+                brand=brand,
+                category=category,
+                product_img_url=product_img_url
             ))
     return result
 
@@ -134,72 +161,249 @@ async def calculate_score(
                 detail=f"Topper product with ID {request.topper_products} not found",
             )
 
-    # TODO: Implement actual score calculation logic
-    # For now, return a placeholder response structure
-    # The user mentioned they will provide the calculation logic
+    # Get processed product data for base product
+    from app.models.product import ProcessedProduct, ProductDetails, ProductList
+    from app.scoring.dynamic_score_calculator import DynamicScoreCalculator
+    from app.models.product import FoodStorageEnum, PackagingSizeEnum, ShelfLifeEnum
     
-    # Placeholder calculation - this should be replaced with actual scoring logic
-    from app.services.scoring_service import ScoringService
-    scoring_service = ScoringService(db)
+    # Get ProductList first (request.base_products is ProductList.id)
+    base_product_list = db.query(ProductList).filter(ProductList.id == request.base_products).first()
     
-    # Calculate base product score
-    base_score_result = scoring_service.calculate_product_score(request.base_products)
+    if not base_product_list or not base_product_list.details:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Product details not found for base product ID {request.base_products}",
+        )
     
-    # Calculate topper product score if provided
-    topper_score_result = None
-    if request.topper_products:
-        topper_score_result = scoring_service.calculate_product_score(request.topper_products)
+    # Get processed product record using ProductDetails.id
+    processed_base = (
+        db.query(ProcessedProduct)
+        .filter(ProcessedProduct.product_detail_id == base_product_list.details.id)
+        .first()
+    )
+    
+    if not processed_base:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Processed product data not found for base product ID {request.base_products}. Please run --process-all to process this product.",
+        )
+    
+    # Get base score (Phase 1 - pre-calculated)
+    base_score = float(processed_base.base_score) if processed_base.base_score is not None else None
+    
+    if base_score is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Base score not available for product ID {request.base_products}. Please run --process-all to calculate base scores.",
+        )
+    
+    # Map API request strings to enum values
+    def map_storage_to_enum(storage_str: str) -> FoodStorageEnum:
+        """Map storage string to FoodStorageEnum."""
+        mapping = {
+            "Freezer": FoodStorageEnum.FREEZER,
+            "Refrigerator": FoodStorageEnum.REFRIGERATOR,
+            "Cool Dry Space (Away from moisture)": FoodStorageEnum.COOL_DRY_AWAY,
+            "Cool Dry Space (Not away from moisture)": FoodStorageEnum.COOL_DRY_NOT_AWAY,
+        }
+        return mapping.get(storage_str, FoodStorageEnum.FREEZER)
+    
+    def map_packaging_to_enum(packaging_str: str) -> PackagingSizeEnum:
+        """Map packaging size string to PackagingSizeEnum."""
+        mapping = {
+            "a month": PackagingSizeEnum.ONE_MONTH,
+            "1 month": PackagingSizeEnum.ONE_MONTH,
+            "2 month": PackagingSizeEnum.TWO_MONTH,
+            "3+ month": PackagingSizeEnum.THREE_PLUS_MONTH,
+        }
+        return mapping.get(packaging_str, PackagingSizeEnum.ONE_MONTH)
+    
+    def map_shelf_life_to_enum(shelf_life_str: str) -> ShelfLifeEnum:
+        """Map shelf life string to ShelfLifeEnum."""
+        mapping = {
+            "7Day": ShelfLifeEnum.SEVEN_DAY,
+            "7 day": ShelfLifeEnum.SEVEN_DAY,
+            "8-14 Day": ShelfLifeEnum.EIGHT_TO_FOURTEEN_DAY,
+            "8-14 day": ShelfLifeEnum.EIGHT_TO_FOURTEEN_DAY,
+            "15+Day": ShelfLifeEnum.FIFTEEN_PLUS_DAY,
+            "15+ day": ShelfLifeEnum.FIFTEEN_PLUS_DAY,
+        }
+        return mapping.get(shelf_life_str, ShelfLifeEnum.SEVEN_DAY)
+    
+    # Convert request strings to enums
+    food_storage_enum = map_storage_to_enum(request.storage) if request.storage else None
+    packaging_size_enum = map_packaging_to_enum(request.packaging_size) if request.packaging_size else None
+    shelf_life_enum = map_shelf_life_to_enum(request.shelf_life) if request.shelf_life else None
+    
+    # Calculate final score using dynamic score calculator (Phase 2)
+    dynamic_calculator = DynamicScoreCalculator()
+    score_result = dynamic_calculator.calculate_final_score(
+        base_score=base_score,
+        food_category=processed_base.food_category,
+        processing_method=processed_base.processing_adulteration_method,
+        food_storage=food_storage_enum,
+        packaging_size=packaging_size_enum,
+        shelf_life=shelf_life_enum,
+    )
+    
+    if score_result.get("error"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=score_result["error"],
+        )
     
     # Get carb percent from base product
     carb_percent = float(base_product.get("Starchy Carb %") or base_product.get("starchy_carb_pct") or 0.0)
     
-    # Calculate total score (simplified - should be replaced with actual logic)
-    total_score = base_score_result.total_score if base_score_result else 0.0
-    if topper_score_result:
-        # Combine scores (simplified - actual logic needed)
-        total_score = (total_score + topper_score_result.total_score) / 2
-    
-    # Determine classification based on score
-    if total_score >= 90:
-        classification = "Excellent"
-    elif total_score >= 80:
-        classification = "Very Good"
-    elif total_score >= 70:
-        classification = "Good"
-    elif total_score >= 60:
-        classification = "Fair"
-    else:
-        classification = "Poor"
-    
     # Build micro score components
-    # This is a placeholder - actual calculation should use the scoring service components
-    # and apply deductions based on storage, packaging, shelf_life, etc.
-    
     from app.schemas.score_calculation import MicroScore, MicroScoreComponent
     
-    # Placeholder micro scores - these should be calculated from actual scoring logic
+    # Calculate micro scores based on deductions
+    # Note: These are simplified - actual implementation may need more detailed breakdown
+    deductions = score_result.get("deductions", {})
+    
+    # Calculate storage score (100 - deduction)
+    storage_deduction = deductions.get("food_storage", 0)
+    storage_score = max(0, 100 - (storage_deduction * 25))  # Scale to 0-100
+    
+    # Calculate packaging score (100 - deduction)
+    packaging_deduction = deductions.get("packaging_size", 0)
+    packaging_score = max(0, 100 - (packaging_deduction * 14))  # Scale to 0-100
+    
+    # Calculate shelf life score (100 - deduction)
+    shelf_life_deduction = deductions.get("thawed_shelf_life", 0)
+    shelf_life_score = max(0, 100 - (shelf_life_deduction * 17))  # Scale to 0-100
+    
+    # Placeholder for other micro scores (these would need to be calculated from base score breakdown)
+    # For now, using simplified values
     micro_score = MicroScore(
-        food=MicroScoreComponent(grade="A", score=90),
-        sourcing=MicroScoreComponent(grade="A", score=88),
-        processing=MicroScoreComponent(grade="B", score=82),
-        adequacy=MicroScoreComponent(grade="A", score=95),
-        carb=MicroScoreComponent(grade="B", score=80),
-        ingredient_quality_protein=MicroScoreComponent(grade="A", score=92),
-        ingredient_quality_fat=MicroScoreComponent(grade="A", score=85),
-        ingredient_quality_fiber=MicroScoreComponent(grade="B", score=78),
-        ingredient_quality_carbohydrate=MicroScoreComponent(grade="B", score=75),
-        dirty_dozen=MicroScoreComponent(grade="A", score=100),
-        synthetic=MicroScoreComponent(grade="B", score=80),
-        longevity=MicroScoreComponent(grade="A", score=90),
-        storage=MicroScoreComponent(grade="A", score=88),
-        packaging=MicroScoreComponent(grade="B", score=82),
-        shelf_life=MicroScoreComponent(grade="A", score=90),
+        food=MicroScoreComponent(grade="A", score=90),  # Placeholder
+        sourcing=MicroScoreComponent(grade="A", score=88),  # Placeholder
+        processing=MicroScoreComponent(grade="B", score=82),  # Placeholder
+        adequacy=MicroScoreComponent(grade="A", score=95),  # Placeholder
+        carb=MicroScoreComponent(grade="B", score=80),  # Placeholder
+        ingredient_quality_protein=MicroScoreComponent(grade="A", score=92),  # Placeholder
+        ingredient_quality_fat=MicroScoreComponent(grade="A", score=85),  # Placeholder
+        ingredient_quality_fiber=MicroScoreComponent(grade="B", score=78),  # Placeholder
+        ingredient_quality_carbohydrate=MicroScoreComponent(grade="B", score=75),  # Placeholder
+        dirty_dozen=MicroScoreComponent(grade="A", score=100),  # Placeholder
+        synthetic=MicroScoreComponent(grade="B", score=80),  # Placeholder
+        longevity=MicroScoreComponent(grade="A", score=90),  # Placeholder
+        storage=MicroScoreComponent(grade=_get_grade_from_score(storage_score), score=int(storage_score)),
+        packaging=MicroScoreComponent(grade=_get_grade_from_score(packaging_score), score=int(packaging_score)),
+        shelf_life=MicroScoreComponent(grade=_get_grade_from_score(shelf_life_score), score=int(shelf_life_score)),
     )
     
     return ScoreCalculationResponse(
-        score=total_score,
-        classification=classification,
+        score=score_result["final_score"],
+        classification=score_result["classification"],
         carb_percent=carb_percent,
         micro_score=micro_score,
     )
+
+
+def _get_grade_from_score(score: float) -> str:
+    """Convert score to letter grade."""
+    if score >= 90:
+        return "A"
+    elif score >= 80:
+        return "B"
+    elif score >= 70:
+        return "C"
+    elif score >= 60:
+        return "D"
+    else:
+        return "F"
+
+
+@router.get(
+    "/enums/storage",
+    response_model=EnumListResponse,
+    summary="Get food storage enum values",
+    description="Retrieve all available food storage enum values from the database.",
+)
+async def get_storage_enums():
+    """
+    Get all food storage enum values.
+
+    Returns:
+        EnumListResponse containing all food storage enum values
+    """
+    values = [
+        EnumValueResponse(value=enum.value, label=enum.value)
+        for enum in FoodStorageEnum
+    ]
+    return EnumListResponse(enum_name="FoodStorageEnum", values=values)
+
+
+@router.get(
+    "/enums/packaging",
+    response_model=EnumListResponse,
+    summary="Get packaging size enum values",
+    description="Retrieve all available packaging size enum values from the database.",
+)
+async def get_packaging_enums():
+    """
+    Get all packaging size enum values.
+
+    Returns:
+        EnumListResponse containing all packaging size enum values
+    """
+    values = [
+        EnumValueResponse(value=enum.value, label=enum.value)
+        for enum in PackagingSizeEnum
+    ]
+    return EnumListResponse(enum_name="PackagingSizeEnum", values=values)
+
+
+@router.get(
+    "/enums/shelf-life",
+    response_model=EnumListResponse,
+    summary="Get shelf life enum values",
+    description="Retrieve all available shelf life enum values from the database.",
+)
+async def get_shelf_life_enums():
+    """
+    Get all shelf life enum values.
+
+    Returns:
+        EnumListResponse containing all shelf life enum values
+    """
+    values = [
+        EnumValueResponse(value=enum.value, label=enum.value)
+        for enum in ShelfLifeEnum
+    ]
+    return EnumListResponse(enum_name="ShelfLifeEnum", values=values)
+
+
+@router.get(
+    "/enums/all",
+    summary="Get all enum values",
+    description="Retrieve all available enum values (storage, packaging, shelf-life) in a single response.",
+)
+async def get_all_enums():
+    """
+    Get all enum values (storage, packaging, shelf-life).
+
+    Returns:
+        Dictionary containing all enum lists
+    """
+    storage_values = [
+        EnumValueResponse(value=enum.value, label=enum.value)
+        for enum in FoodStorageEnum
+    ]
+    packaging_values = [
+        EnumValueResponse(value=enum.value, label=enum.value)
+        for enum in PackagingSizeEnum
+    ]
+    shelf_life_values = [
+        EnumValueResponse(value=enum.value, label=enum.value)
+        for enum in ShelfLifeEnum
+    ]
+
+    return {
+        "storage": EnumListResponse(enum_name="FoodStorageEnum", values=storage_values).model_dump(),
+        "packaging": EnumListResponse(enum_name="PackagingSizeEnum", values=packaging_values).model_dump(),
+        "shelf_life": EnumListResponse(enum_name="ShelfLifeEnum", values=shelf_life_values).model_dump(),
+    }
 

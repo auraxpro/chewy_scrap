@@ -12,15 +12,10 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
-from app.config import (
-    SCORE_WEIGHT_INGREDIENTS,
-    SCORE_WEIGHT_NUTRITION,
-    SCORE_WEIGHT_PRICE_VALUE,
-    SCORE_WEIGHT_PROCESSING,
-    SCORING_VERSION,
-)
-from app.models.product import ProductList
+from app.config import SCORING_VERSION
+from app.models.product import ProcessedProduct, ProductList
 from app.models.score import ProductScore, ScoreComponent
+from app.scoring.base_score_calculator import BaseScoreCalculator
 
 
 class ScoringService:
@@ -131,24 +126,25 @@ class ScoringService:
         return scores, total
 
     def calculate_product_score(
-        self, product_id: int, force_recalculate: bool = False
+        self, product_id: int, force_recalculate: bool = False, ignore_existing_base_score: bool = False
     ) -> Optional[ProductScore]:
         """
-        Calculate or retrieve score for a product.
-
+        Calculate Base Score for a product using Phase 1 scoring system.
+        
+        This calculates the Base Score (intrinsic food quality) which is:
+        - Calculated once and stored in the database
+        - Never recalculated at runtime (unless force_recalculate=True or ignore_existing_base_score=True)
+        - Based ONLY on food-intrinsic factors from processed_products table
+        
         Args:
             product_id: Product ID
             force_recalculate: Force recalculation even if score exists
+            ignore_existing_base_score: Ignore existing base_score in ProcessedProduct and recalculate
 
         Returns:
             ProductScore instance or None if calculation failed
         """
-        # Check if score already exists
-        existing_score = self.get_score_by_product_id(product_id)
-        if existing_score and not force_recalculate:
-            return existing_score
-
-        # Get product
+        # Get product with processed data
         product = (
             self.db.query(ProductList)
             .options(joinedload(ProductList.details))
@@ -159,68 +155,64 @@ class ScoringService:
         if not product or not product.details:
             return None
 
-        # TODO: Implement actual scoring logic using scorer classes
-        # For now, create a placeholder score
-        total_score = 0.0
+        # Get ProcessedProduct - this is the only table we use for scoring
+        processed_product = (
+            self.db.query(ProcessedProduct)
+            .filter(ProcessedProduct.product_detail_id == product.details.id)
+            .first()
+        )
+
+        if not processed_product:
+            return None
+
+        # Calculate Base Score using BaseScoreCalculator
+        base_score_calculator = BaseScoreCalculator(self.db)
+        
+        if ignore_existing_base_score:
+            # Recalculate base_score regardless of existing value (for terminal commands)
+            base_score = base_score_calculator.calculate_base_score(processed_product)
+            
+            # Update ProcessedProduct with new base_score
+            if base_score is not None:
+                processed_product.base_score = base_score
+                self.db.add(processed_product)
+                self.db.flush()
+        else:
+            # Use existing base_score if available, otherwise calculate
+            if processed_product.base_score is not None:
+                base_score = float(processed_product.base_score)
+            else:
+                base_score = base_score_calculator.calculate_base_score(processed_product)
+                if base_score is not None:
+                    processed_product.base_score = base_score
+                    self.db.add(processed_product)
+                    self.db.flush()
+
+        if base_score is None:
+            return None
+
+        # Base Score is the total score for Phase 1
+        # Phase 2 (dynamic handling deductions) is handled separately in the API
+        total_score = base_score
+
+        # Create component for base score breakdown
         components = []
-
-        # Ingredient Quality Score
-        from app.scoring.ingredient_quality_scorer import IngredientQualityScorer
-        
-        ingredient_scorer = IngredientQualityScorer(self.db, weight=SCORE_WEIGHT_INGREDIENTS)
-        ingredient_score = ingredient_scorer.calculate_score(product)
-        ingredient_details = ingredient_scorer.get_score_details(product)
-        
         components.append(
             {
-                "component_name": "ingredient_quality",
-                "component_score": ingredient_score,
-                "weight": SCORE_WEIGHT_INGREDIENTS,
-                "weighted_score": ingredient_score * SCORE_WEIGHT_INGREDIENTS,
-                "confidence": ingredient_scorer.get_confidence(product),
-                "details": json.dumps(ingredient_details) if ingredient_details else None,
+                "component_name": "base_score",
+                "component_score": total_score,
+                "weight": 1.0,
+                "weighted_score": total_score,
+                "confidence": 1.0,
+                "details": json.dumps({
+                    "food_category": processed_product.food_category.value if processed_product.food_category else None,
+                    "sourcing_integrity": processed_product.sourcing_integrity.value if processed_product.sourcing_integrity else None,
+                    "processing_method": processed_product.processing_adulteration_method.value if processed_product.processing_adulteration_method else None,
+                    "nutritionally_adequate": processed_product.nutritionally_adequate,
+                    "starchy_carb_pct": float(processed_product.starchy_carb_pct) if processed_product.starchy_carb_pct else None,
+                }),
             }
         )
-        total_score += ingredient_score * SCORE_WEIGHT_INGREDIENTS
-
-        # Nutritional Value Score (placeholder)
-        nutrition_score = self._calculate_nutrition_score(product)
-        components.append(
-            {
-                "component_name": "nutritional_value",
-                "component_score": nutrition_score,
-                "weight": SCORE_WEIGHT_NUTRITION,
-                "weighted_score": nutrition_score * SCORE_WEIGHT_NUTRITION,
-                "confidence": 0.85,
-            }
-        )
-        total_score += nutrition_score * SCORE_WEIGHT_NUTRITION
-
-        # Processing Method Score (placeholder)
-        processing_score = self._calculate_processing_score(product)
-        components.append(
-            {
-                "component_name": "processing_method",
-                "component_score": processing_score,
-                "weight": SCORE_WEIGHT_PROCESSING,
-                "weighted_score": processing_score * SCORE_WEIGHT_PROCESSING,
-                "confidence": 0.75,
-            }
-        )
-        total_score += processing_score * SCORE_WEIGHT_PROCESSING
-
-        # Price-Value Score (placeholder)
-        price_value_score = self._calculate_price_value_score(product)
-        components.append(
-            {
-                "component_name": "price_value",
-                "component_score": price_value_score,
-                "weight": SCORE_WEIGHT_PRICE_VALUE,
-                "weighted_score": price_value_score * SCORE_WEIGHT_PRICE_VALUE,
-                "confidence": 0.70,
-            }
-        )
-        total_score += price_value_score * SCORE_WEIGHT_PRICE_VALUE
 
         # Create or update score
         if existing_score and force_recalculate:
@@ -267,6 +259,7 @@ class ScoringService:
         self,
         product_ids: List[int],
         force_recalculate: bool = False,
+        ignore_existing_base_score: bool = False,
     ) -> Dict:
         """
         Calculate scores for multiple products.
@@ -274,6 +267,7 @@ class ScoringService:
         Args:
             product_ids: List of product IDs
             force_recalculate: Force recalculation even if scores exist
+            ignore_existing_base_score: Ignore existing base_score and recalculate
 
         Returns:
             Dictionary with calculation results
@@ -287,7 +281,11 @@ class ScoringService:
 
         for product_id in product_ids:
             try:
-                score = self.calculate_product_score(product_id, force_recalculate)
+                score = self.calculate_product_score(
+                    product_id, 
+                    force_recalculate=force_recalculate,
+                    ignore_existing_base_score=ignore_existing_base_score
+                )
                 if score:
                     results["successful"] += 1
                 else:
@@ -414,28 +412,6 @@ class ScoringService:
             )
 
         return query.limit(limit).all()
-
-    # Placeholder scoring methods (to be replaced with actual scorer classes)
-
-    def _calculate_ingredient_score(self, product: ProductList) -> float:
-        """Placeholder for ingredient quality scoring."""
-        # TODO: Implement actual ingredient scoring logic
-        return 75.0
-
-    def _calculate_nutrition_score(self, product: ProductList) -> float:
-        """Placeholder for nutritional value scoring."""
-        # TODO: Implement actual nutrition scoring logic
-        return 80.0
-
-    def _calculate_processing_score(self, product: ProductList) -> float:
-        """Placeholder for processing method scoring."""
-        # TODO: Implement actual processing scoring logic
-        return 70.0
-
-    def _calculate_price_value_score(self, product: ProductList) -> float:
-        """Placeholder for price-value scoring."""
-        # TODO: Implement actual price-value scoring logic
-        return 72.0
 
     def delete_score(self, score_id: int) -> bool:
         """

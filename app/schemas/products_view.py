@@ -12,10 +12,13 @@ from pydantic import BaseModel, Field
 
 
 class ProductListItemResponse(BaseModel):
-    """Simplified schema for product list response with only id and name."""
+    """Simplified schema for product list response with id, name, brand, category, and image URL."""
 
     id: int = Field(..., description="Product ID")
     name: str = Field(..., description="Product Name")
+    brand: str = Field(..., description="Brand Name")
+    category: Optional[str] = Field(None, description="Food Category")
+    product_img_url: Optional[str] = Field(None, description="Product Image URL")
 
     class Config:
         populate_by_name = True
@@ -29,6 +32,7 @@ class ProductViewResponse(BaseModel):
     brand_website: Optional[str] = Field(None, description="Brand Website")
     product_detail_page: Optional[str] = Field(None, description="Product Detail Page")
     product_name: Optional[str] = Field(None, description="Product Name")
+    brand: Optional[str] = Field(None, description="Brand Name")
     flavors_recipe: Optional[str] = Field(None, description="Flavors/Recipe")
     food_category: Optional[str] = Field(None, description="Food Category")
     sourcing_integrity: Optional[str] = Field(None, description="Sourcing Integrity")
@@ -89,6 +93,7 @@ class ProductViewResponse(BaseModel):
             "Brand Website": "brand_website",
             "Product Detail Page": "product_detail_page",
             "Product Name": "product_name",
+            "Brand": "brand",
             "Flavors/Recipe": "flavors_recipe",
             "Food Category": "food_category",
             "Sourcing Integrity": "sourcing_integrity",

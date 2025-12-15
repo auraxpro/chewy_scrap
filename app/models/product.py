@@ -248,6 +248,10 @@ class ProcessedProduct(Base):
 
     # Basic Information
     flavor = Column(Text, nullable=True)
+    brand = Column(String, nullable=True)
+    brand_detection_method = Column(String, nullable=True)
+    brand_detection_confidence = Column(String, nullable=True)
+    brand_detection_reason = Column(Text, nullable=True)
 
     # Food Category
     food_category = Column(
@@ -431,6 +435,9 @@ class ProcessedProduct(Base):
         nullable=True,
     )
 
+    # Base Score (Phase 1 - Pre-calculated, never recalculated at runtime)
+    base_score = Column(Numeric(5, 2), nullable=True)
+
     # Metadata
     processed_at = Column(DateTime, default=datetime.utcnow, nullable=True)
     processor_version = Column(String(50), nullable=True)
@@ -450,6 +457,10 @@ class ProcessedProduct(Base):
             "id": self.id,
             "product_detail_id": self.product_detail_id,
             "flavor": self.flavor,
+            "brand": self.brand,
+            "brand_detection_method": self.brand_detection_method,
+            "brand_detection_confidence": self.brand_detection_confidence,
+            "brand_detection_reason": self.brand_detection_reason,
             "food_category": _enum_value(self.food_category)
             if self.food_category
             else None,
@@ -554,6 +565,7 @@ class ProcessedProduct(Base):
             "shelf_life_thawed": _enum_value(self.shelf_life_thawed)
             if self.shelf_life_thawed
             else None,
+            "base_score": float(self.base_score) if self.base_score is not None else None,
             "processed_at": self.processed_at.isoformat()
             if self.processed_at
             else None,

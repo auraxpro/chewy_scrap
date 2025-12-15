@@ -81,8 +81,11 @@ class ProductsViewService:
             self.db.query(
                 ProductList.id.label("Product ID"),
                 ProductList.product_url.label("Brand Website"),
+                ProductList.product_image_url.label("Product Image URL"),
                 ProductDetails.product_url.label("Product Detail Page"),
                 ProductDetails.product_name.label("Product Name"),
+                ProductDetails.img_link.label("Product Image Link"),
+                ProcessedProduct.brand.label("Brand"),
                 ProcessedProduct.flavor.label("Flavors/Recipe"),
                 ProcessedProduct.food_category.label("Food Category"),
                 ProcessedProduct.sourcing_integrity.label("Sourcing Integrity"),
@@ -162,8 +165,11 @@ class ProductsViewService:
             self.db.query(
                 ProductList.id.label("Product ID"),
                 ProductList.product_url.label("Brand Website"),
+                ProductList.product_image_url.label("Product Image URL"),
                 ProductDetails.product_url.label("Product Detail Page"),
                 ProductDetails.product_name.label("Product Name"),
+                ProductDetails.img_link.label("Product Image Link"),
+                ProcessedProduct.brand.label("Brand"),
                 ProcessedProduct.flavor.label("Flavors/Recipe"),
                 ProcessedProduct.food_category.label("Food Category"),
                 ProcessedProduct.sourcing_integrity.label("Sourcing Integrity"),
