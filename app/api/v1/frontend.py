@@ -7,7 +7,7 @@ This module provides REST API endpoints specifically designed for frontend consu
 - /score - Calculate score with pet information and return detailed score breakdown
 """
 
-from typing import List
+from typing import TYPE_CHECKING, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -21,6 +21,11 @@ from app.schemas.score_calculation import (
     ScoreCalculationResponse,
 )
 from app.services.products_view_service import ProductsViewService
+
+if TYPE_CHECKING:
+    from app.models.product import ProcessedProduct
+    from app.scoring.base_score_calculator import BaseScoreCalculator
+    from app.schemas.score_calculation import MicroScore
 
 router = APIRouter()
 
@@ -145,6 +150,8 @@ async def calculate_score(
     """
     # Get base product
     base_product = products_view_service.get_product_by_id(request.base_products)
+    print('base_product:')
+    print(base_product)
     if not base_product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -164,6 +171,7 @@ async def calculate_score(
     # Get processed product data for base product
     from app.models.product import ProcessedProduct, ProductDetails, ProductList
     from app.scoring.dynamic_score_calculator import DynamicScoreCalculator
+    from app.scoring.base_score_calculator import BaseScoreCalculator
     from app.models.product import FoodStorageEnum, PackagingSizeEnum, ShelfLifeEnum
     
     # Get ProductList first (request.base_products is ProductList.id)
@@ -181,6 +189,8 @@ async def calculate_score(
         .filter(ProcessedProduct.product_detail_id == base_product_list.details.id)
         .first()
     )
+    print('processed_base:')
+    print(processed_base)
     
     if not processed_base:
         raise HTTPException(
@@ -258,47 +268,175 @@ async def calculate_score(
     # Build micro score components
     from app.schemas.score_calculation import MicroScore, MicroScoreComponent
     
-    # Calculate micro scores based on deductions
-    # Note: These are simplified - actual implementation may need more detailed breakdown
-    deductions = score_result.get("deductions", {})
-    
-    # Calculate storage score (100 - deduction)
-    storage_deduction = deductions.get("food_storage", 0)
-    storage_score = max(0, 100 - (storage_deduction * 25))  # Scale to 0-100
-    
-    # Calculate packaging score (100 - deduction)
-    packaging_deduction = deductions.get("packaging_size", 0)
-    packaging_score = max(0, 100 - (packaging_deduction * 14))  # Scale to 0-100
-    
-    # Calculate shelf life score (100 - deduction)
-    shelf_life_deduction = deductions.get("thawed_shelf_life", 0)
-    shelf_life_score = max(0, 100 - (shelf_life_deduction * 17))  # Scale to 0-100
-    
-    # Placeholder for other micro scores (these would need to be calculated from base score breakdown)
-    # For now, using simplified values
-    micro_score = MicroScore(
-        food=MicroScoreComponent(grade="A", score=90),  # Placeholder
-        sourcing=MicroScoreComponent(grade="A", score=88),  # Placeholder
-        processing=MicroScoreComponent(grade="B", score=82),  # Placeholder
-        adequacy=MicroScoreComponent(grade="A", score=95),  # Placeholder
-        carb=MicroScoreComponent(grade="B", score=80),  # Placeholder
-        ingredient_quality_protein=MicroScoreComponent(grade="A", score=92),  # Placeholder
-        ingredient_quality_fat=MicroScoreComponent(grade="A", score=85),  # Placeholder
-        ingredient_quality_fiber=MicroScoreComponent(grade="B", score=78),  # Placeholder
-        ingredient_quality_carbohydrate=MicroScoreComponent(grade="B", score=75),  # Placeholder
-        dirty_dozen=MicroScoreComponent(grade="A", score=100),  # Placeholder
-        synthetic=MicroScoreComponent(grade="B", score=80),  # Placeholder
-        longevity=MicroScoreComponent(grade="A", score=90),  # Placeholder
-        storage=MicroScoreComponent(grade=_get_grade_from_score(storage_score), score=int(storage_score)),
-        packaging=MicroScoreComponent(grade=_get_grade_from_score(packaging_score), score=int(packaging_score)),
-        shelf_life=MicroScoreComponent(grade=_get_grade_from_score(shelf_life_score), score=int(shelf_life_score)),
-    )
+    # Calculate micro scores using BaseScoreCalculator logic
+    base_calculator = BaseScoreCalculator(db)
+    micro_score = _calculate_micro_scores(processed_base, base_calculator, score_result)
     
     return ScoreCalculationResponse(
         score=score_result["final_score"],
         classification=score_result["classification"],
         carb_percent=carb_percent,
         micro_score=micro_score,
+    )
+
+
+def _calculate_micro_scores(
+    processed_product: "ProcessedProduct",
+    base_calculator: "BaseScoreCalculator",
+    score_result: dict,
+) -> "MicroScore":
+    """
+    Calculate micro scores using BaseScoreCalculator logic.
+    
+    Args:
+        processed_product: ProcessedProduct instance
+        base_calculator: BaseScoreCalculator instance
+        score_result: Result from dynamic score calculator containing deductions
+        
+    Returns:
+        MicroScore with all components calculated
+    """
+    from app.schemas.score_calculation import MicroScore, MicroScoreComponent
+    
+    # Helper function to convert deduction to score (0-100)
+    def deduction_to_score(deduction: float, max_deduction: float) -> float:
+        """Convert deduction to score (100 - scaled deduction)."""
+        if deduction is None:
+            return 100.0  # Default to perfect score if deduction is None
+        scaled_deduction = (deduction / max_deduction) * 100 if max_deduction > 0 else 0
+        return max(0.0, min(100.0, 100.0 - scaled_deduction))
+    
+    # Helper function to convert bonus to score (0-100)
+    def bonus_to_score(bonus: float, max_bonus: float) -> float:
+        """Convert bonus to score (100 + scaled bonus, capped at 100)."""
+        if bonus is None:
+            return 100.0  # Default to perfect score if bonus is None
+        scaled_bonus = (bonus / max_bonus) * 100 if max_bonus > 0 else 0
+        return min(100.0, 100.0 + scaled_bonus)
+    
+    # 1. Food Category Score (max deduction:15)
+    food_category_deduction = base_calculator._calculate_food_category_deduction(
+        processed_product.food_category
+    )
+    food_score = deduction_to_score(food_category_deduction or 0, 15)
+    
+    print('food_category_deduction:')
+    print(food_category_deduction)
+    # 2. Sourcing Integrity Score (max deduction: 10)
+    sourcing_deduction = base_calculator._calculate_sourcing_integrity_deduction(
+        processed_product.sourcing_integrity
+    )
+    print('sourcing_deduction:')
+    print(processed_product.sourcing_integrity)
+    sourcing_score = deduction_to_score(sourcing_deduction or 0, 10)
+    
+    # 3. Processing Method Score (max deduction: 15)
+    processing_deduction = base_calculator._calculate_processing_method_deduction(
+        processed_product.processing_adulteration_method
+    )
+    processing_score = deduction_to_score(processing_deduction or 0, 15)
+    
+    # 4. Nutritionally Adequate Score (max deduction: 10)
+    adequacy_deduction = base_calculator._calculate_nutritionally_adequate_deduction(
+        processed_product.nutritionally_adequate
+    )
+    adequacy_score = deduction_to_score(adequacy_deduction or 0, 10)
+    
+    # 5. Starchy Carb Score (max deduction: 10)
+    starchy_carb_deduction = base_calculator._calculate_starchy_carb_deduction(
+        float(processed_product.starchy_carb_pct) if processed_product.starchy_carb_pct is not None else None
+    )
+    carb_score = deduction_to_score(starchy_carb_deduction or 0, 10)
+    
+    # 6. Ingredient Quality - Protein Score (max deduction: 5)
+    protein_deduction = base_calculator._calculate_ingredient_quality_deduction(
+        high_count=processed_product.protein_ingredients_high or 0,
+        good_count=processed_product.protein_ingredients_good or 0,
+        moderate_count=processed_product.protein_ingredients_moderate or 0,
+        low_count=processed_product.protein_ingredients_low or 0,
+        max_deduction=9,
+    )
+    protein_score = deduction_to_score(protein_deduction, 5)
+    
+    # 7. Ingredient Quality - Fat Score (max deduction: 5)
+    fat_deduction = base_calculator._calculate_ingredient_quality_deduction(
+        high_count=processed_product.fat_ingredients_high or 0,
+        good_count=processed_product.fat_ingredients_good or 0,
+        moderate_count=0,  # Fats don't have moderate tier
+        low_count=processed_product.fat_ingredients_low or 0,
+        max_deduction=5,
+    )
+    fat_score = deduction_to_score(fat_deduction, 5)
+    
+    # 8. Ingredient Quality - Carbohydrate Score (max deduction: 5)
+    carb_ingredient_deduction = base_calculator._calculate_ingredient_quality_deduction(
+        high_count=processed_product.carb_ingredients_high or 0,
+        good_count=processed_product.carb_ingredients_good or 0,
+        moderate_count=processed_product.carb_ingredients_moderate or 0,
+        low_count=processed_product.carb_ingredients_low or 0,
+        max_deduction=5,
+    )
+    carb_ingredient_score = deduction_to_score(carb_ingredient_deduction, 5)
+    
+    # 9. Ingredient Quality - Fiber Score (max deduction: 5)
+    fiber_deduction = base_calculator._calculate_ingredient_quality_deduction(
+        high_count=processed_product.fiber_ingredients_high or 0,
+        good_count=processed_product.fiber_ingredients_good or 0,
+        moderate_count=processed_product.fiber_ingredients_moderate or 0,
+        low_count=processed_product.fiber_ingredients_low or 0,
+        max_deduction=10,
+    )
+    fiber_score = deduction_to_score(fiber_deduction, 5)
+    
+    # 10. Dirty Dozen Score (max deduction: 10)
+    dirty_dozen_deduction = base_calculator._calculate_dirty_dozen_deduction(
+        processed_product.dirty_dozen_ingredients_count or 0
+    )
+    dirty_dozen_score = deduction_to_score(dirty_dozen_deduction, 10)
+    
+    # 11. Synthetic Nutrition Score (max deduction: 5)
+    synthetic_deduction = base_calculator._calculate_synthetic_nutrition_deduction(
+        processed_product.synthetic_nutrition_addition_count or 0
+    )
+    synthetic_score = deduction_to_score(synthetic_deduction, 5)
+    
+    # 12. Longevity Additives Score (max bonus: +5) - This is a bonus, so higher is better
+    longevity_bonus = base_calculator._calculate_longevity_additives_bonus(
+        processed_product.longevity_additives_count or 0
+    )
+    longevity_score = bonus_to_score(longevity_bonus, 5)
+    
+    # 13-15. Storage, Packaging, Shelf Life scores from dynamic calculator deductions
+    deductions = score_result.get("deductions", {})
+    
+    # Storage score (max deduction: 5 points, but scaled to 0-100)
+    storage_deduction = deductions.get("food_storage", 0)
+    storage_score = max(0, 100 - (storage_deduction * (100 / 5)))  # Scale: 5 deduction = 0 score
+    
+    # Packaging score (max deduction: 5 points, but scaled to 0-100)
+    packaging_deduction = deductions.get("packaging_size", 0)
+    packaging_score = max(0, 100 - (packaging_deduction * (100 / 5)))  # Scale: 5 deduction = 0 score
+    
+    # Shelf life score (max deduction: 5 points, but scaled to 0-100)
+    shelf_life_deduction = deductions.get("thawed_shelf_life", 0)
+    shelf_life_score = max(0, 100 - (shelf_life_deduction * (100 / 5)))  # Scale: 5 deduction = 0 score
+    
+    return MicroScore(
+        food=MicroScoreComponent(grade=_get_grade_from_score(food_score), score=int(food_score)),
+        sourcing=MicroScoreComponent(grade=_get_grade_from_score(sourcing_score), score=int(sourcing_score)),
+        processing=MicroScoreComponent(grade=_get_grade_from_score(processing_score), score=int(processing_score)),
+        adequacy=MicroScoreComponent(grade=_get_grade_from_score(adequacy_score), score=int(adequacy_score)),
+        carb=MicroScoreComponent(grade=_get_grade_from_score(carb_score), score=int(carb_score)),
+        ingredient_quality_protein=MicroScoreComponent(grade=_get_grade_from_score(protein_score), score=int(protein_score)),
+        ingredient_quality_fat=MicroScoreComponent(grade=_get_grade_from_score(fat_score), score=int(fat_score)),
+        ingredient_quality_fiber=MicroScoreComponent(grade=_get_grade_from_score(fiber_score), score=int(fiber_score)),
+        ingredient_quality_carbohydrate=MicroScoreComponent(grade=_get_grade_from_score(carb_ingredient_score), score=int(carb_ingredient_score)),
+        dirty_dozen=MicroScoreComponent(grade=_get_grade_from_score(dirty_dozen_score), score=int(dirty_dozen_score)),
+        synthetic=MicroScoreComponent(grade=_get_grade_from_score(synthetic_score), score=int(synthetic_score)),
+        longevity=MicroScoreComponent(grade=_get_grade_from_score(longevity_score), score=int(longevity_score)),
+        storage=MicroScoreComponent(grade=_get_grade_from_score(storage_score), score=int(storage_score)),
+        packaging=MicroScoreComponent(grade=_get_grade_from_score(packaging_score), score=int(packaging_score)),
+        shelf_life=MicroScoreComponent(grade=_get_grade_from_score(shelf_life_score), score=int(shelf_life_score)),
     )
 
 

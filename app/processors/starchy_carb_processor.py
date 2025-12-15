@@ -223,7 +223,7 @@ class StarchyCarbProcessor:
             return None
 
         # Use default ash if not provided
-        ash_value = ash if ash is not None else 7.0
+        ash_value = ash if ash is not None else 6.0
 
         # Determine if this is Dry or Wet/Raw food
         # If food_category is not set, infer from moisture content:
